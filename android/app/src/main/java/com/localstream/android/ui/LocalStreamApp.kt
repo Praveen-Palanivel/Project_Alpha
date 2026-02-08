@@ -41,6 +41,8 @@ import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.localstream.android.ui.model.ConnectionStatus
+import com.localstream.android.ui.model.ConnectionType
 import com.localstream.android.ui.model.LocalStreamMode
 import com.localstream.android.ui.model.LocalStreamUiState
 import com.localstream.android.ui.model.TransferSnapshot
@@ -111,13 +113,30 @@ fun LocalStreamApp() {
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             item {
-                HeroCard(transfer = uiState.transfer)
+                HeroCard(
+                    transfer = uiState.transfer,
+                    connection = uiState.connection
+                )
             }
 
             item {
                 ModeCard(
                     selectedMode = uiState.mode,
                     onModeSelected = localStreamViewModel::setMode
+                )
+            }
+
+            // Connection status card
+            item {
+                ConnectionCard(
+                    connection = uiState.connection,
+                    onCheckConnection = localStreamViewModel::checkConnection,
+                    onOpenWifiSettings = {
+                        context.startActivity(localStreamViewModel.getWifiSettingsIntent())
+                    },
+                    onOpenHotspotSettings = {
+                        context.startActivity(localStreamViewModel.getHotspotSettingsIntent())
+                    }
                 )
             }
 
@@ -183,7 +202,7 @@ fun LocalStreamApp() {
 }
 
 @Composable
-private fun HeroCard(transfer: TransferSnapshot) {
+private fun HeroCard(transfer: TransferSnapshot, connection: ConnectionStatus) {
     val speedMbs = toMbps(transfer.speedBytesPerSec)
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -196,14 +215,78 @@ private fun HeroCard(transfer: TransferSnapshot) {
                 text = "ULTRA HIGH SPEED TRANSFER",
                 style = MaterialTheme.typography.titleMedium
             )
-            Text(
-                text = "QUIC-ready scaffold with instant file pick and transfer controls.",
-                style = MaterialTheme.typography.bodyMedium
-            )
+            if (connection.isConnected) {
+                Text(
+                    text = "Your IP: ${connection.localIpAddress ?: "Unknown"}",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
             Text(
                 text = "Live speed: ${"%.1f".format(speedMbs)} MB/s",
                 style = MaterialTheme.typography.labelLarge
             )
+        }
+    }
+}
+
+@Composable
+private fun ConnectionCard(
+    connection: ConnectionStatus,
+    onCheckConnection: () -> Unit,
+    onOpenWifiSettings: () -> Unit,
+    onOpenHotspotSettings: () -> Unit
+) {
+    val connectionIcon = when (connection.connectionType) {
+        ConnectionType.WIFI -> "📶"
+        ConnectionType.HOTSPOT -> "📡"
+        ConnectionType.NONE -> "❌"
+    }
+    
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (connection.isConnected) 
+                MaterialTheme.colorScheme.secondaryContainer 
+            else 
+                MaterialTheme.colorScheme.errorContainer
+        )
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "$connectionIcon Network",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                OutlinedButton(onClick = onCheckConnection) {
+                    Text("Refresh")
+                }
+            }
+            
+            Text(
+                text = connection.statusMessage,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            
+            if (connection.localIpAddress != null) {
+                Text(
+                    text = "IP: ${connection.localIpAddress}",
+                    style = MaterialTheme.typography.labelLarge
+                )
+            }
+            
+            if (!connection.isConnected) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onOpenWifiSettings) {
+                        Text("WiFi Settings")
+                    }
+                    OutlinedButton(onClick = onOpenHotspotSettings) {
+                        Text("Hotspot")
+                    }
+                }
+            }
         }
     }
 }

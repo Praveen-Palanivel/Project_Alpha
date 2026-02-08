@@ -1,24 +1,31 @@
 package com.localstream.android.ui
 
 import android.content.Context
+import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.localstream.android.core.ConnectionSetupHelper
 import com.localstream.android.core.QuicTransferCoreAdapter
 import com.localstream.android.core.TransferCoreAdapter
+import com.localstream.android.ui.model.ConnectionStatus
+import com.localstream.android.ui.model.ConnectionType
 import com.localstream.android.ui.model.LocalStreamMode
 import com.localstream.android.ui.model.LocalStreamUiState
 import com.localstream.android.ui.model.PeerDevice
 import com.localstream.android.ui.model.TransferSnapshot
 import com.localstream.android.ui.model.TransferStatus
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlin.math.max
 
 class LocalStreamViewModel(
-    private val transferCoreAdapter: TransferCoreAdapter
+    private val transferCoreAdapter: TransferCoreAdapter,
+    private val connectionHelper: ConnectionSetupHelper
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(LocalStreamUiState())
@@ -27,13 +34,85 @@ class LocalStreamViewModel(
     private var lastTransferMode: LocalStreamMode = LocalStreamMode.SEND
 
     init {
-        refreshDevices()
+        checkConnection()
     }
 
+    // ==========================================================================
+    // Connection Management
+    // ==========================================================================
+    
+    fun checkConnection() {
+        val status = connectionHelper.checkConnectionStatus()
+        _uiState.update { 
+            it.copy(
+                connection = ConnectionStatus(
+                    isConnected = status.isConnected,
+                    connectionType = when (status.connectionType) {
+                        ConnectionSetupHelper.ConnectionType.WIFI -> ConnectionType.WIFI
+                        ConnectionSetupHelper.ConnectionType.HOTSPOT -> ConnectionType.HOTSPOT
+                        ConnectionSetupHelper.ConnectionType.NONE -> ConnectionType.NONE
+                    },
+                    localIpAddress = status.localIpAddress,
+                    networkName = status.ssid,
+                    statusMessage = status.message
+                ),
+                showConnectionPrompt = !status.isConnected
+            )
+        }
+        
+        // Auto-start discovery if connected
+        if (status.isConnected) {
+            refreshDevices()
+        }
+    }
+    
+    fun dismissConnectionPrompt() {
+        _uiState.update { it.copy(showConnectionPrompt = false) }
+    }
+    
+    fun getWifiSettingsIntent(): Intent = connectionHelper.getWifiSettingsIntent()
+    
+    fun getHotspotSettingsIntent(): Intent = connectionHelper.getHotspotSettingsIntent()
+    
+    fun getSetupInstructions(): String {
+        val role = when (_uiState.value.mode) {
+            LocalStreamMode.SEND -> ConnectionSetupHelper.TransferRole.SENDER
+            LocalStreamMode.RECEIVE -> ConnectionSetupHelper.TransferRole.RECEIVER
+        }
+        return connectionHelper.getSetupInstructions(role)
+    }
+
+    // ==========================================================================
+    // Mode Selection
+    // ==========================================================================
+    
     fun setMode(mode: LocalStreamMode) {
         _uiState.update { it.copy(mode = mode) }
+        
+        // Check connection and show prompt if needed
+        checkConnection()
+        
+        // Auto-start receive server when in receive mode
+        if (mode == LocalStreamMode.RECEIVE && _uiState.value.connection.isConnected) {
+            startReceiveInBackground()
+        }
+    }
+    
+    private fun startReceiveInBackground() {
+        viewModelScope.launch {
+            // Small delay to allow UI to update
+            delay(500)
+            if (_uiState.value.mode == LocalStreamMode.RECEIVE && 
+                _uiState.value.transfer.status == TransferStatus.IDLE) {
+                startReceive()
+            }
+        }
     }
 
+    // ==========================================================================
+    // File Selection
+    // ==========================================================================
+    
     fun onFileSelected(fileName: String?, fileUri: String?) {
         _uiState.update {
             it.copy(
@@ -52,40 +131,72 @@ class LocalStreamViewModel(
         _uiState.update { it.copy(selectedPeerId = peerId) }
     }
 
+    // ==========================================================================
+    // Device Discovery
+    // ==========================================================================
+    
     fun refreshDevices() {
+        if (!_uiState.value.connection.isConnected) {
+            _uiState.update { 
+                it.copy(
+                    showConnectionPrompt = true,
+                    lastActionHint = "Connect to WiFi or enable Hotspot first"
+                )
+            }
+            return
+        }
+        
         _uiState.update {
             it.copy(
+                peers = emptyList(),
                 transfer = it.transfer.copy(status = TransferStatus.DISCOVERING),
-                lastActionHint = "Searching for devices..."
+                lastActionHint = "Searching for nearby devices..."
             )
         }
         
         val peers = mutableListOf<PeerDevice>()
         transferCoreAdapter.discoverDevices { device ->
-            peers.add(device)
-            _uiState.update {
-                it.copy(
-                    peers = peers.toList(),
-                    lastActionHint = "Found ${peers.size} nearby devices"
-                )
+            if (!peers.any { it.id == device.id }) {
+                peers.add(device)
+                _uiState.update {
+                    it.copy(
+                        peers = peers.toList(),
+                        lastActionHint = "Found ${peers.size} nearby device(s)"
+                    )
+                }
             }
         }
         
-        _uiState.update {
-            it.copy(
-                transfer = it.transfer.copy(
-                    status = if (it.transfer.status == TransferStatus.TRANSFERRING) {
-                        TransferStatus.TRANSFERRING
+        // Update status after discovery starts
+        viewModelScope.launch {
+            delay(10000)  // Discovery runs for 10 seconds
+            _uiState.update {
+                it.copy(
+                    transfer = if (it.transfer.status == TransferStatus.DISCOVERING) {
+                        it.transfer.copy(status = TransferStatus.IDLE)
                     } else {
-                        TransferStatus.IDLE
-                    }
+                        it.transfer
+                    },
+                    lastActionHint = if (peers.isEmpty()) "No devices found. Make sure both devices are on the same network." 
+                                     else "Found ${peers.size} device(s). Select one to connect."
                 )
-            )
+            }
         }
     }
 
+    // ==========================================================================
+    // File Transfer
+    // ==========================================================================
+    
     fun startSend() {
         val state = _uiState.value
+        
+        // Check connection first
+        if (!state.connection.isConnected) {
+            _uiState.update { it.copy(showConnectionPrompt = true) }
+            return
+        }
+        
         if (state.selectedFileUri == null || state.selectedFileName == null) {
             _uiState.update { it.copy(lastActionHint = "Pick a file before sending") }
             return
@@ -94,7 +205,7 @@ class LocalStreamViewModel(
         val selectedIp = state.peers.firstOrNull { it.id == state.selectedPeerId }?.ipAddress
         val targetIp = selectedIp ?: state.manualIp
         if (targetIp.isBlank()) {
-            _uiState.update { it.copy(lastActionHint = "Select a peer or enter target IP") }
+            _uiState.update { it.copy(lastActionHint = "Select a device or enter IP address") }
             return
         }
 
@@ -102,14 +213,14 @@ class LocalStreamViewModel(
         _uiState.update {
             it.copy(
                 transfer = TransferSnapshot(
-                    status = TransferStatus.PREPARING,
+                    status = TransferStatus.CONNECTING,
                     fileName = state.selectedFileName,
                     transferredBytes = 0L,
                     totalBytes = 0L,
                     speedBytesPerSec = 0L,
                     averageBytesPerSec = 0L
                 ),
-                lastActionHint = "Starting send to $targetIp"
+                lastActionHint = "Connecting to $targetIp..."
             )
         }
 
@@ -126,7 +237,7 @@ class LocalStreamViewModel(
                             status = TransferStatus.COMPLETED,
                             speedBytesPerSec = 0L
                         ),
-                        lastActionHint = "Send completed"
+                        lastActionHint = "Transfer completed successfully!"
                     )
                 }
             },
@@ -138,7 +249,7 @@ class LocalStreamViewModel(
                             errorMessage = error,
                             speedBytesPerSec = 0L
                         ),
-                        lastActionHint = error
+                        lastActionHint = "Transfer failed: $error"
                     )
                 }
             }
@@ -146,21 +257,29 @@ class LocalStreamViewModel(
     }
 
     fun startReceive() {
+        val state = _uiState.value
+        
+        // Check connection first
+        if (!state.connection.isConnected) {
+            _uiState.update { it.copy(showConnectionPrompt = true) }
+            return
+        }
+        
         lastTransferMode = LocalStreamMode.RECEIVE
         _uiState.update {
             it.copy(
                 transfer = TransferSnapshot(
                     status = TransferStatus.PREPARING,
-                    fileName = "incoming.localstream",
+                    fileName = "Waiting for incoming file...",
                     transferredBytes = 0L,
                     totalBytes = 0L
                 ),
-                lastActionHint = "Waiting for sender"
+                lastActionHint = "Ready to receive. Your IP: ${state.connection.localIpAddress ?: "Unknown"}"
             )
         }
 
         transferCoreAdapter.startReceive(
-            savePath = "Downloads",
+            savePath = "",  // Will use public Downloads folder
             onProgress = { transferred, total, speed ->
                 updateTransferProgress(transferred, total, speed)
             },
@@ -171,7 +290,7 @@ class LocalStreamViewModel(
                             status = TransferStatus.COMPLETED,
                             speedBytesPerSec = 0L
                         ),
-                        lastActionHint = "Receive completed"
+                        lastActionHint = "File received and saved to Downloads!"
                     )
                 }
             },
@@ -183,7 +302,7 @@ class LocalStreamViewModel(
                             errorMessage = error,
                             speedBytesPerSec = 0L
                         ),
-                        lastActionHint = error
+                        lastActionHint = "Receive failed: $error"
                     )
                 }
             }
@@ -218,6 +337,11 @@ class LocalStreamViewModel(
             } else {
                 speed
             }
+            
+            // Format speed for status
+            val speedMbps = speed / (1024 * 1024)
+            val percent = (transferred * 100 / safeTotal).toInt()
+            
             state.copy(
                 transfer = state.transfer.copy(
                     status = TransferStatus.TRANSFERRING,
@@ -227,21 +351,15 @@ class LocalStreamViewModel(
                     averageBytesPerSec = nextAvg,
                     errorMessage = null
                 ),
-                lastActionHint = "Transferring..."
+                lastActionHint = "Transferring: $percent% @ $speedMbps MB/s"
             )
         }
     }
     
-    /**
-     * Factory to create LocalStreamViewModel with real or fake adapter.
-     * 
-     * Usage in Activity/Fragment:
-     * ```kotlin
-     * val viewModel: LocalStreamViewModel by viewModels {
-     *     LocalStreamViewModel.Factory(applicationContext)
-     * }
-     * ```
-     */
+    // ==========================================================================
+    // Factory
+    // ==========================================================================
+    
     class Factory(
         private val context: Context,
         private val useFakeAdapter: Boolean = false
@@ -250,17 +368,14 @@ class LocalStreamViewModel(
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             if (modelClass.isAssignableFrom(LocalStreamViewModel::class.java)) {
+                val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
                 val adapter: TransferCoreAdapter = if (useFakeAdapter) {
-                    com.localstream.android.core.FakeTransferCoreAdapter(
-                        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
-                    )
+                    com.localstream.android.core.FakeTransferCoreAdapter(scope)
                 } else {
-                    QuicTransferCoreAdapter(
-                        context.applicationContext,
-                        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
-                    )
+                    QuicTransferCoreAdapter(context.applicationContext, scope)
                 }
-                return LocalStreamViewModel(adapter) as T
+                val connectionHelper = ConnectionSetupHelper(context.applicationContext)
+                return LocalStreamViewModel(adapter, connectionHelper) as T
             }
             throw IllegalArgumentException("Unknown ViewModel class")
         }
