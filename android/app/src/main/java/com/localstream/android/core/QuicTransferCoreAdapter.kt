@@ -1,7 +1,9 @@
 package com.localstream.android.core
 
 import android.content.Context
+import android.net.Uri
 import android.net.wifi.WifiManager
+import android.os.Environment
 import android.util.Log
 import com.localstream.android.ui.model.PeerDevice
 import kotlinx.coroutines.CoroutineScope
@@ -83,7 +85,7 @@ class QuicTransferCoreAdapter(
     // Device Discovery (UDP Broadcast per discovery.md)
     // ==========================================================================
     
-    override fun discoverDevices(onFound: (PeerDevice) -&gt; Unit) {
+    override fun discoverDevices(onFound: (PeerDevice) -> Unit) {
         discoveryJob?.cancel()
         discoveredDevices.clear()
         
@@ -251,11 +253,16 @@ class QuicTransferCoreAdapter(
         cancelActiveTransfer()
         
         activeTransferJob = scope.launch(Dispatchers.IO) {
+            var temporarySourceFile: File? = null
             try {
-                val file = File(filePath)
-                if (!file.exists()) {
+                val source = resolveSourceFile(filePath)
+                if (source == null) {
                     withContext(Dispatchers.Main) { onError("File not found") }
                     return@launch
+                }
+                val (file, displayName, isTemporary) = source
+                if (isTemporary) {
+                    temporarySourceFile = file
                 }
                 
                 val totalBytes = file.length()
@@ -290,7 +297,7 @@ class QuicTransferCoreAdapter(
                 
                 // File offer
                 val fileChecksum = computeFileChecksum(file)
-                val offerMsg = buildFileOffer(file.name, totalBytes, fileChecksum)
+                val offerMsg = buildFileOffer(displayName, totalBytes, fileChecksum)
                 output.write(offerMsg)
                 output.flush()
                 
@@ -367,6 +374,8 @@ class QuicTransferCoreAdapter(
                 Log.e(TAG, "Send error", e)
                 speedBytesPerSec = 0L
                 withContext(Dispatchers.Main) { onError(e.message ?: "Transfer failed") }
+            } finally {
+                runCatching { temporarySourceFile?.delete() }
             }
         }
     }
@@ -425,7 +434,11 @@ class QuicTransferCoreAdapter(
                 Log.d(TAG, "File offer: $fileName, $totalBytes bytes")
                 
                 // Send FILE_ACCEPT
-                val saveFile = File(savePath, fileName)
+                val receiveDir = resolveReceiveDirectory(savePath)
+                if (!receiveDir.exists()) {
+                    receiveDir.mkdirs()
+                }
+                val saveFile = File(receiveDir, fileName)
                 val acceptMsg = buildFileAccept(saveFile.absolutePath)
                 output.write(acceptMsg)
                 output.flush()
@@ -624,5 +637,51 @@ class QuicTransferCoreAdapter(
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun resolveSourceFile(filePath: String): Triple<File, String, Boolean>? {
+        val directFile = File(filePath)
+        if (directFile.exists()) {
+            return Triple(directFile, directFile.name, false)
+        }
+
+        val uri = runCatching { Uri.parse(filePath) }.getOrNull() ?: return null
+        if (uri.scheme != "content") {
+            return null
+        }
+
+        val name = context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (nameIndex >= 0 && cursor.moveToFirst()) {
+                cursor.getString(nameIndex)
+            } else {
+                null
+            }
+        } ?: "shared_file"
+
+        val tmpFile = File(context.cacheDir, "localstream_${System.currentTimeMillis()}_$name")
+        val copied = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                tmpFile.outputStream().use { output -> input.copyTo(output) }
+            }
+        }.isSuccess
+
+        return if (copied && tmpFile.exists()) {
+            Triple(tmpFile, name, true)
+        } else {
+            null
+        }
+    }
+
+    private fun resolveReceiveDirectory(savePath: String): File {
+        if (savePath.isNotBlank()) {
+            val candidate = File(savePath)
+            if (candidate.isAbsolute) {
+                return candidate
+            }
+        }
+
+        return context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: context.filesDir
     }
 }
