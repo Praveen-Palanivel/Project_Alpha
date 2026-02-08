@@ -1,360 +1,468 @@
-LOCALSTREAM — AUTONOMOUS PROJECT PLAN
+# LOCALSTREAM — AUTONOMOUS PROJECT PLAN
 
-(Single Source of Truth)
+> **Single Source of Truth**
 
-0. PROJECT DEFINITION
-Objective
+---
+
+## 🎯 CORE GOALS
+
+> **These are the PRIMARY objectives all agents must work toward:**
+
+### Goal 1: ULTRA HIGH SPEED TRANSFER (QUIC-POWERED)
+- **QUIC protocol** as the primary transport layer
+- Achieve maximum possible transfer speeds over local Wi-Fi
+- Target: Saturate gigabit network bandwidth
+- Zero unnecessary overhead or delays
+- QUIC multiplexed streams for parallel chunk transfer
+- Built-in resume capability via QUIC connection migration
+- 0-RTT connection establishment for instant transfers
+
+### Goal 2: ANDROID APPLICATION
+- Native Android app (Kotlin)
+- Clean, intuitive UI for file selection and transfer
+- Full permission handling (storage, Wi-Fi)
+- Background transfer support
+- Progress display and notifications
+
+### Goal 3: WINDOWS APPLICATION  
+- Windows desktop app (Flutter)
+- Native file dialogs and drag-drop support
+- System tray integration
+- Multi-file queue management
+- Cross-platform protocol compatibility
+
+---
+
+## 0. PROJECT DEFINITION
+
+### Objective
 
 Build a local, high-speed, offline file sharing application supporting:
 
-Android ↔ Android
+- Android ↔ Android
+- Android ↔ Windows
+- Windows ↔ Windows
 
-Android ↔ Windows
+### Non-Goals
 
-Windows ↔ Windows
+- ❌ No macOS
+- ❌ No internet servers
+- ❌ No cloud
+- ❌ No accounts
+- ❌ No encryption beyond basic session safety (for now)
 
-Non-Goals
+---
 
-No macOS
+## 1. PROJECT GOVERNANCE
 
-No internet servers
+### Branching Strategy
 
-No cloud
+| Branch    | Purpose                  | Protected |
+|-----------|--------------------------|-----------|
+| `agent-A` | Core & Networking        | No        |
+| `agent-B` | Apps & UI                | No        |
+| `dev`     | Integration              | ✅ Yes    |
+| `main`    | Releases (optional)      | ✅ Yes    |
 
-No accounts
+### Enforcement Rules
 
-No encryption beyond basic session safety (for now)
+- ✅ CODEOWNERS enforced
+- ✅ PRs required for `dev` and `main`
+- ✅ 1 approval minimum
+- ✅ No bypassing rules
 
-1. PROJECT GOVERNANCE
-Branching
+---
 
-agent-A → Core & Networking
+## 2. AGENT ROLES
 
-agent-B → Apps & UI
+> ⚠️ **IMMUTABLE UNTIL EXPLICIT CHANGE**
 
-dev → Integration (protected)
+### 🧠 Agent A — Core Systems
 
-main → Releases (optional, later)
-
-Enforcement
-
-CODEOWNERS enforced
-
-PRs required
-
-1 approval minimum
-
-No bypassing rules
-
-2. AGENT ROLES (IMMUTABLE UNTIL CHANGE)
-🧠 Agent A — Core Systems
-
-Owns directories
-
+**Owns:**
+```
 /core
 /discovery
+```
 
+**Accountabilities:**
+- Transfer protocol
+- Discovery mechanism
+- Performance optimization
+- Cross-platform compatibility
 
-Accountabilities
+**Forbidden:**
+- ❌ Editing `/android`
+- ❌ Editing `/windows`
 
-Transfer protocol
+---
 
-Discovery
+### 🎨 Agent B — Applications
 
-Performance
-
-Cross-platform compatibility
-
-Forbidden
-
-Editing /android
-
-Editing /windows
-
-🎨 Agent B — Applications
-
-Owns directories
-
+**Owns:**
+```
 /android
 /windows
+```
+
+**Accountabilities:**
+- UI implementation
+- File picking
+- Permissions handling
+- User experience
+
+**Forbidden:**
+- ❌ Editing `/core`
+- ❌ Editing `/discovery`
+
+---
+
+## 3. TECH STACK (LOCKED)
+
+| Component   | Technology                          |
+|-------------|-------------------------------------|
+| Networking  | **QUIC** over local Wi-Fi           |
+| Fallback    | TCP (if QUIC unavailable)           |
+| Discovery   | UDP broadcast (IPv4) + Manual IP    |
+| Android     | Kotlin + cronet/quiche              |
+| Windows     | Flutter + quiche/msquic             |
+| Protocol    | Language-agnostic (documented)      |
+
+### Why QUIC?
+- **Multiplexed streams** — parallel chunk transfers without head-of-line blocking
+- **0-RTT handshake** — instant connection, no TCP slow start
+- **Built-in encryption** — TLS 1.3 by default
+- **Connection migration** — seamless resume if network changes
+- **Congestion control** — optimized for high throughput
+
+---
+
+## 4. MILESTONES OVERVIEW
+
+| Milestone | Description              | Owner   | Status |
+|-----------|--------------------------|---------|--------|
+| M1        | Protocol & discovery spec| Agent A | ⬜     |
+| M2        | App scaffolds            | Agent B | ⬜     |
+| M3        | Same-platform transfer   | A + B   | ⬜     |
+| M4        | Cross-platform transfer  | A + B   | ⬜     |
+| M5        | Stability & polish       | A + B   | ⬜     |
+
+---
+
+## 5. DETAILED TASK BREAKDOWN
+
+### MILESTONE 1 — FOUNDATIONS
+
+#### Task A1 — Define Transfer Protocol
 
+| Field      | Value                    |
+|------------|--------------------------|
+| Agent      | A                        |
+| Output     | `docs/protocol.md`       |
+| Depends On | None                     |
+| Status     | ⬜ Not Started           |
+
+**Must Specify:**
+- [ ] QUIC stream design (control stream + data streams)
+- [ ] Handshake sequence over QUIC
+- [ ] Metadata fields (name, size, checksum)
+- [ ] Chunk size (default: 4MB for QUIC)
+- [ ] Parallel stream count optimization
+- [ ] Resume capability (QUIC connection migration)
+- [ ] Error codes
+- [ ] Fallback to TCP behavior
 
-Accountabilities
+**Done When:**
+> Another agent can implement sender/receiver from doc alone
+
+---
+
+#### Task A2 — Define Discovery Mechanism
+
+| Field      | Value                    |
+|------------|--------------------------|
+| Agent      | A                        |
+| Output     | `docs/discovery.md`      |
+| Depends On | None                     |
+| Status     | ⬜ Not Started           |
 
-UI
+**Must Specify:**
+- [ ] UDP broadcast port
+- [ ] Broadcast payload format
+- [ ] Device naming rules
+- [ ] Collision handling
+- [ ] Timeout behavior
+
+---
+
+#### Task B1 — App Architecture Draft
+
+| Field      | Value                       |
+|------------|-----------------------------|
+| Agent      | B                           |
+| Output     | `docs/app-architecture.md`  |
+| Depends On | None                        |
+| Status     | ⬜ Not Started              |
 
-File picking
+**Must Specify:**
+- [ ] Screens
+- [ ] Navigation flow
+- [ ] Where core logic plugs in
+- [ ] Background handling assumptions
 
-Permissions
+---
 
-User experience
+### MILESTONE 2 — SCAFFOLDS
 
-Forbidden
+#### Task B2 — Android Scaffold
 
-Editing /core
+| Field      | Value                    |
+|------------|--------------------------|
+| Agent      | B                        |
+| Directory  | `/android`               |
+| Depends On | B1                       |
+| Status     | ⬜ Not Started           |
 
-Editing /discovery
+**Must Include:**
+- [ ] Empty app structure
+- [ ] File picker integration
+- [ ] Permission handling
+- [ ] Placeholder send/receive buttons
 
-3. TECH STACK (LOCKED)
-Networking
+> ⚠️ No real networking yet.
 
-Primary: TCP over local Wi-Fi (initial)
+---
 
-Future: QUIC upgrade
+#### Task B3 — Windows Scaffold
 
-Discovery
+| Field      | Value                    |
+|------------|--------------------------|
+| Agent      | B                        |
+| Directory  | `/windows`               |
+| Depends On | B1                       |
+| Status     | ⬜ Not Started           |
 
-UDP broadcast (IPv4)
+**Must Include:**
+- [ ] App window
+- [ ] File selection dialog
+- [ ] Placeholder transfer screen
 
-Manual IP fallback
+---
 
-Languages
+### MILESTONE 3 — SAME PLATFORM TRANSFER
 
-Core logic: language-agnostic protocol (documented)
+#### Task A3 — Core Sender
 
-Android: Kotlin
+| Field      | Value                    |
+|------------|--------------------------|
+| Agent      | A                        |
+| Directory  | `/core`                  |
+| Depends On | A1                       |
+| Status     | ⬜ Not Started           |
 
-Windows: Flutter (Windows target)
+**Must Implement:**
+- [ ] File read operations
+- [ ] Chunk send logic
+- [ ] Progress callbacks
 
-4. MILESTONES OVERVIEW
-Milestone	Description	Owner
-M1	Protocol & discovery spec	Agent A
-M2	App scaffolds	Agent B
-M3	Same-platform transfer	A + B
-M4	Cross-platform transfer	A + B
-M5	Stability & polish	A + B
-5. DETAILED TASK BREAKDOWN
-MILESTONE 1 — FOUNDATIONS
-Task A1 — Define Transfer Protocol
+---
 
-Agent: A
-Output: docs/protocol.md
+#### Task A4 — Core Receiver
 
-Must specify:
+| Field      | Value                    |
+|------------|--------------------------|
+| Agent      | A                        |
+| Directory  | `/core`                  |
+| Depends On | A1                       |
+| Status     | ⬜ Not Started           |
 
-Handshake sequence
+**Must Implement:**
+- [ ] File write operations
+- [ ] Resume logic
+- [ ] Checksum validation
 
-Metadata fields (name, size, checksum)
+---
 
-Chunk size (default: 1MB)
+#### Task B4 — Android ↔ Android Wiring
 
-Resume capability (offset-based)
+| Field      | Value                    |
+|------------|--------------------------|
+| Agent      | B                        |
+| Directory  | `/android`               |
+| Depends On | A3, A4, B2               |
+| Status     | ⬜ Not Started           |
 
-Error codes
+**Must:**
+- [ ] Connect UI → core
+- [ ] Show progress
+- [ ] Handle failure gracefully
 
-Done when:
+---
 
-Another agent can implement sender/receiver from doc alone
+#### Task B5 — Windows ↔ Windows Wiring
 
-Task A2 — Define Discovery Mechanism
+| Field      | Value                    |
+|------------|--------------------------|
+| Agent      | B                        |
+| Directory  | `/windows`               |
+| Depends On | A3, A4, B3               |
+| Status     | ⬜ Not Started           |
 
-Agent: A
-Output: docs/discovery.md
+**Must:**
+- [ ] Connect UI → core
+- [ ] Show progress
+- [ ] Handle failure gracefully
 
-Must specify:
+---
 
-UDP broadcast port
+### MILESTONE 4 — CROSS PLATFORM
 
-Broadcast payload format
+#### Task A5 — Compatibility Layer
 
-Device naming rules
+| Field      | Value                    |
+|------------|--------------------------|
+| Agent      | A                        |
+| Directory  | `/core`                  |
+| Depends On | A3, A4                   |
+| Status     | ⬜ Not Started           |
 
-Collision handling
+**Must Ensure:**
+- [ ] Endianness consistency
+- [ ] File path normalization
+- [ ] Platform-agnostic protocol use
 
-Timeout behavior
+---
 
-Task B1 — App Architecture Draft
+#### Task B6 — Android ↔ Windows UI Flow
 
-Agent: B
-Output: docs/app-architecture.md
+| Field      | Value                    |
+|------------|--------------------------|
+| Agent      | B                        |
+| Directories| `/android`, `/windows`   |
+| Depends On | A5, B4, B5               |
+| Status     | ⬜ Not Started           |
 
-Must specify:
+**Must:**
+- [ ] Discover cross-platform peer
+- [ ] Initiate transfer
+- [ ] Display correct status
 
-Screens
+---
 
-Navigation flow
+### MILESTONE 5 — POLISH
 
-Where core logic plugs in
+#### Task A6 — Performance Tuning
 
-Background handling assumptions
+| Field      | Value                    |
+|------------|--------------------------|
+| Agent      | A                        |
+| Directory  | `/core`                  |
+| Depends On | A5                       |
+| Status     | ⬜ Not Started           |
 
-MILESTONE 2 — SCAFFOLDS
-Task B2 — Android Scaffold
+**Focus:**
+- [ ] QUIC stream tuning (optimal parallel stream count)
+- [ ] Chunk size optimization (4MB, 8MB, 16MB)
+- [ ] 0-RTT optimization
+- [ ] Congestion control tuning for LAN
+- [ ] Error recovery
 
-Agent: B
-Directory: /android
+---
 
-Must include:
+#### Task B7 — UX Polish
 
-Empty app
+| Field      | Value                    |
+|------------|--------------------------|
+| Agent      | B                        |
+| Directories| `/android`, `/windows`   |
+| Depends On | B6                       |
+| Status     | ⬜ Not Started           |
 
-File picker
+**Focus:**
+- [ ] Progress clarity
+- [ ] Cancel / retry
+- [ ] Clear success state
 
-Permission handling
+---
 
-Placeholder send/receive buttons
+## 6. TASK DEPENDENCY GRAPH
 
-No real networking yet.
+```
+M1 (Foundation)
+├── A1 (Protocol)
+│   ├── A3 (Sender)
+│   └── A4 (Receiver)
+├── A2 (Discovery)
+└── B1 (Architecture)
+    ├── B2 (Android Scaffold)
+    └── B3 (Windows Scaffold)
 
-Task B3 — Windows Scaffold
+M3 (Same Platform)
+├── A3 + A4 + B2 → B4 (Android Wiring)
+└── A3 + A4 + B3 → B5 (Windows Wiring)
 
-Agent: B
-Directory: /windows
+M4 (Cross Platform)
+├── A3 + A4 → A5 (Compatibility)
+└── A5 + B4 + B5 → B6 (Cross UI)
 
-Must include:
+M5 (Polish)
+├── A5 → A6 (Performance)
+└── B6 → B7 (UX)
+```
 
-App window
+---
 
-File selection
+## 7. AUTONOMOUS WORK RULES
 
-Placeholder transfer screen
+1. ✅ Agents pull `dev` before starting work
+2. ✅ One task = one PR
+3. ✅ Small commits only
+4. ✅ No cross-ownership edits
+5. ✅ If blocked → document in PR & wait
 
-MILESTONE 3 — SAME PLATFORM TRANSFER
-Task A3 — Core Sender
+---
 
-Agent: A
-Directory: /core
+## 8. STOP CONDITIONS
 
-Must implement:
+> Agents **MUST STOP** if:
 
-File read
+- ⚠️ Protocol unclear
+- ⚠️ Cross-ownership dependency unresolved
+- 🛑 Human says **STOP**
 
-Chunk send
+---
 
-Progress callbacks
+## 9. CHANGE CONDITIONS
 
-Task A4 — Core Receiver
+> **Only the human may:**
+- Change roles
+- Change tech stack
+- Change scope
 
-Agent: A
+Agents adapt immediately upon change.
 
-Must implement:
+---
 
-File write
+## 10. SUCCESS DEFINITION
 
-Resume logic
+Project is **SUCCESSFUL** when:
 
-Checksum validation
+- [ ] Large files (>5GB) transfer locally
+- [ ] No internet required
+- [ ] Stable UI on both platforms
+- [ ] Cross-platform verified (Android ↔ Windows)
 
-Task B4 — Android ↔ Android Wiring
+---
 
-Agent: B
+## 11. OPERATIONAL COMMANDS
 
-Must:
+| Command          | Action                         |
+|------------------|--------------------------------|
+| `START`          | Begin next uncompleted task    |
+| `STOP`           | Pause all work                 |
+| `CHANGE <thing>` | Modify this plan               |
+| `STATUS`         | Report current progress        |
 
-Connect UI → core
+---
 
-Show progress
-
-Handle failure gracefully
-
-Task B5 — Windows ↔ Windows Wiring
-
-Agent: B
-
-Same expectations as Android.
-
-MILESTONE 4 — CROSS PLATFORM
-Task A5 — Compatibility Layer
-
-Agent: A
-
-Ensure:
-
-Endianness consistency
-
-File path normalization
-
-Platform-agnostic protocol use
-
-Task B6 — Android ↔ Windows UI Flow
-
-Agent: B
-
-Must:
-
-Discover Windows peer
-
-Initiate transfer
-
-Display correct status
-
-MILESTONE 5 — POLISH
-Task A6 — Performance Tuning
-
-Agent: A
-
-Focus:
-
-Larger chunks
-
-Parallel streams (optional)
-
-Error recovery
-
-Task B7 — UX Polish
-
-Agent: B
-
-Focus:
-
-Progress clarity
-
-Cancel / retry
-
-Clear success state
-
-6. AUTONOMOUS WORK RULES
-
-Agents pull dev before starting work
-
-One task = one PR
-
-Small commits only
-
-No cross-ownership edits
-
-If blocked → document & wait
-
-7. STOP CONDITIONS
-
-Agents must STOP if:
-
-Protocol unclear
-
-Cross-ownership dependency unresolved
-
-You say STOP
-
-8. CHANGE CONDITIONS
-
-Only you may:
-
-Change roles
-
-Change tech
-
-Change scope
-
-Agents adapt immediately.
-
-9. SUCCESS DEFINITION
-
-Project is successful when:
-
-Large files (>5GB) transfer locally
-
-No internet
-
-Stable UI
-
-Cross-platform verified
-
-10. OPERATIONAL COMMANDS (YOU)
-
-START → Begin next uncompleted task
-
-STOP → Pause all work
-
-CHANGE <thing> → Modify constitution
-
-END OF PLAN......
+**END OF PLAN**
