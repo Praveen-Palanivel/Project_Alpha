@@ -1,0 +1,17 @@
+# LocalStream Core Dependencies
+
+# QUIC implementation
+aioquic>=0.9.25
+
+# Async file I/O
+aiofiles>=23.0.0
+
+# Fast checksum
+xxhash>=3.4.0
+
+# TLS certificate generation (for self-signed certs)
+cryptography>=41.0.0
+
+# Development/Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
