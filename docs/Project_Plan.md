@@ -419,6 +419,7 @@ M5 (Polish)
 3. ✅ Small commits only
 4. ✅ No cross-ownership edits
 5. ✅ If blocked → document in PR & wait
+6. ✅ Role branch only: Agent A works on `agent-A`, Agent B works on `agent-B` (no per-task branches)
 
 ---
 

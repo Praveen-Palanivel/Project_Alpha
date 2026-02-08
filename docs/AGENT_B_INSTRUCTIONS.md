@@ -170,10 +170,11 @@ Make users feel the SPEED.
 1. **User experience matters** — Make transfers feel fast and smooth
 2. **PR policy:** No PR for simple tasks (docs/minor edits) unless explicitly requested
 3. **For substantial implementation tasks:** Keep changes focused (prefer one task per PR)
-4. **Don't touch core** — Agent A owns the transfer logic
-5. **Handle permissions properly** — Android needs many permissions
-6. **Pull dev before starting** — Stay synchronized
-7. **Stop if core API unclear** — Check with Agent A's docs
+4. **Branch policy:** Stay on `agent-B` branch (role branch). Do not create per-task branches.
+5. **Don't touch core** — Agent A owns the transfer logic
+6. **Handle permissions properly** — Android needs many permissions
+7. **Pull dev before starting** — Stay synchronized
+8. **Stop if core API unclear** — Check with Agent A's docs
 
 ---
 

@@ -59,6 +59,8 @@ When starting any agent, they work toward these goals:
 | Agent A | `/core`, `/discovery` | `/android`, `/windows` |
 | Agent B | `/android`, `/windows` | `/core`, `/discovery` |
 
+**Branch policy:** Branches represent roles. Agent A uses `agent-A`, Agent B uses `agent-B`. Do not create per-task branches.
+
 ---
 
 ## 🔧 SPECIFIC TASK COMMANDS
@@ -135,7 +137,7 @@ You are Agent [A/B]. Continue your previous work on LocalStream. Check your open
 
 ### Create PR
 ```
-You are Agent [A/B]. Your substantial implementation work is complete. Create a pull request to dev branch. Include a clear description of changes and testing done. Skip PR creation for simple tasks unless explicitly requested by the human.
+You are Agent [A/B]. Your substantial implementation work is complete. Stay on your role branch (`agent-A` or `agent-B`) and create a pull request to dev branch. Include a clear description of changes and testing done. Skip PR creation for simple tasks unless explicitly requested by the human.
 ```
 
 ### Review PR
