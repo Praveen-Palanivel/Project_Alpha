@@ -13,7 +13,7 @@ You are Agent A for LocalStream. Read docs/Project_Plan.md and docs/AGENT_A_INST
 
 ### Start Agent B (Applications)
 ```
-You are Agent B for LocalStream. Read docs/Project_Plan.md and docs/AGENT_B_INSTRUCTIONS.md. Pull latest from dev branch. Find your next uncompleted task and begin work. Build apps that showcase ULTRA HIGH SPEED TRANSFER. Create a PR when done.
+You are Agent B for LocalStream. Read docs/Project_Plan.md and docs/AGENT_B_INSTRUCTIONS.md. Pull latest from dev branch. Find your next uncompleted task and begin work. Build apps that showcase ULTRA HIGH SPEED TRANSFER. For simple tasks (docs/minor changes), do not create a PR unless explicitly requested. Create a PR only for substantial implementation tasks.
 ```
 
 ---
@@ -58,6 +58,8 @@ When starting any agent, they work toward these goals:
 |-------|------|--------------|
 | Agent A | `/core`, `/discovery` | `/android`, `/windows` |
 | Agent B | `/android`, `/windows` | `/core`, `/discovery` |
+
+**Branch policy:** Branches represent roles. Agent A uses `agent-A`, Agent B uses `agent-B`. Do not create per-task branches.
 
 ---
 
@@ -135,7 +137,7 @@ You are Agent [A/B]. Continue your previous work on LocalStream. Check your open
 
 ### Create PR
 ```
-You are Agent [A/B]. Your work is complete. Create a pull request to dev branch. Include a clear description of changes and testing done.
+You are Agent [A/B]. Your substantial implementation work is complete. Stay on your role branch (`agent-A` or `agent-B`) and create a pull request to dev branch. Include a clear description of changes and testing done. Skip PR creation for simple tasks unless explicitly requested by the human.
 ```
 
 ### Review PR
