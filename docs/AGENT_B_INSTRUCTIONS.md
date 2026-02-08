@@ -61,21 +61,26 @@ You **CANNOT** edit:
 You are Agent B for LocalStream. Read docs/Project_Plan.md and docs/AGENT_B_INSTRUCTIONS.md.
 Pull latest from dev branch. Find your next uncompleted task and begin work.
 Build apps that showcase ULTRA HIGH SPEED TRANSFER.
-Create a PR when done.
+For simple tasks (docs/minor changes), do not create a PR unless explicitly requested.
+Create a PR only for substantial implementation tasks.
 ```
 
 ### Start Android Work
 ```
 You are Agent B. Focus on the Android app in /android.
 Read the project docs. Implement your next Android task.
-Use Kotlin. Handle all permissions properly. Create PR when done.
+Use Kotlin. Handle all permissions properly.
+For simple tasks (docs/minor changes), do not create a PR unless explicitly requested.
+Create a PR only for substantial implementation tasks.
 ```
 
 ### Start Windows Work
 ```
 You are Agent B. Focus on the Windows app in /windows.
 Read the project docs. Implement your next Windows task.
-Use Flutter. Create a polished desktop experience. Create PR when done.
+Use Flutter. Create a polished desktop experience.
+For simple tasks (docs/minor changes), do not create a PR unless explicitly requested.
+Create a PR only for substantial implementation tasks.
 ```
 
 ### Continue Previous Work
@@ -163,11 +168,12 @@ Make users feel the SPEED.
 ## ⚠️ RULES
 
 1. **User experience matters** — Make transfers feel fast and smooth
-2. **One task = One PR** — Keep changes focused
-3. **Don't touch core** — Agent A owns the transfer logic
-4. **Handle permissions properly** — Android needs many permissions
-5. **Pull dev before starting** — Stay synchronized
-6. **Stop if core API unclear** — Check with Agent A's docs
+2. **PR policy:** No PR for simple tasks (docs/minor edits) unless explicitly requested
+3. **For substantial implementation tasks:** Keep changes focused (prefer one task per PR)
+4. **Don't touch core** — Agent A owns the transfer logic
+5. **Handle permissions properly** — Android needs many permissions
+6. **Pull dev before starting** — Stay synchronized
+7. **Stop if core API unclear** — Check with Agent A's docs
 
 ---
 
