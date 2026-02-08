@@ -1,8 +1,10 @@
 package com.localstream.android.ui
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.localstream.android.core.FakeTransferCoreAdapter
+import com.localstream.android.core.QuicTransferCoreAdapter
 import com.localstream.android.core.TransferCoreAdapter
 import com.localstream.android.ui.model.LocalStreamMode
 import com.localstream.android.ui.model.LocalStreamUiState
@@ -15,8 +17,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlin.math.max
 
-class LocalStreamViewModel : ViewModel() {
-    private val transferCoreAdapter: TransferCoreAdapter = FakeTransferCoreAdapter(viewModelScope)
+class LocalStreamViewModel(
+    private val transferCoreAdapter: TransferCoreAdapter
+) : ViewModel() {
 
     private val _uiState = MutableStateFlow(LocalStreamUiState())
     val uiState: StateFlow<LocalStreamUiState> = _uiState.asStateFlow()
@@ -50,22 +53,33 @@ class LocalStreamViewModel : ViewModel() {
     }
 
     fun refreshDevices() {
-        val peers = mutableListOf<PeerDevice>()
-        transferCoreAdapter.discoverDevices { peers.add(it) }
         _uiState.update {
             it.copy(
-                peers = peers,
                 transfer = it.transfer.copy(status = TransferStatus.DISCOVERING),
-                lastActionHint = if (peers.isEmpty()) "No peers found" else "Found ${peers.size} nearby devices"
+                lastActionHint = "Searching for devices..."
             )
         }
+        
+        val peers = mutableListOf<PeerDevice>()
+        transferCoreAdapter.discoverDevices { device ->
+            peers.add(device)
+            _uiState.update {
+                it.copy(
+                    peers = peers.toList(),
+                    lastActionHint = "Found ${peers.size} nearby devices"
+                )
+            }
+        }
+        
         _uiState.update {
             it.copy(
-                transfer = it.transfer.copy(status = if (it.transfer.status == TransferStatus.TRANSFERRING) {
-                    TransferStatus.TRANSFERRING
-                } else {
-                    TransferStatus.IDLE
-                })
+                transfer = it.transfer.copy(
+                    status = if (it.transfer.status == TransferStatus.TRANSFERRING) {
+                        TransferStatus.TRANSFERRING
+                    } else {
+                        TransferStatus.IDLE
+                    }
+                )
             )
         }
     }
@@ -200,7 +214,6 @@ class LocalStreamViewModel : ViewModel() {
         _uiState.update { state ->
             val safeTotal = max(total, 1L)
             val nextAvg = if (transferred > 0L) {
-                // Lightweight average estimate for UI feedback.
                 max(speed, (state.transfer.averageBytesPerSec + speed) / 2L)
             } else {
                 speed
@@ -216,6 +229,40 @@ class LocalStreamViewModel : ViewModel() {
                 ),
                 lastActionHint = "Transferring..."
             )
+        }
+    }
+    
+    /**
+     * Factory to create LocalStreamViewModel with real or fake adapter.
+     * 
+     * Usage in Activity/Fragment:
+     * ```kotlin
+     * val viewModel: LocalStreamViewModel by viewModels {
+     *     LocalStreamViewModel.Factory(applicationContext)
+     * }
+     * ```
+     */
+    class Factory(
+        private val context: Context,
+        private val useFakeAdapter: Boolean = false
+    ) : ViewModelProvider.Factory {
+        
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : ViewModel> create(modelClass: Class<T>): T {
+            if (modelClass.isAssignableFrom(LocalStreamViewModel::class.java)) {
+                val adapter: TransferCoreAdapter = if (useFakeAdapter) {
+                    com.localstream.android.core.FakeTransferCoreAdapter(
+                        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
+                    )
+                } else {
+                    QuicTransferCoreAdapter(
+                        context.applicationContext,
+                        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
+                    )
+                }
+                return LocalStreamViewModel(adapter) as T
+            }
+            throw IllegalArgumentException("Unknown ViewModel class")
         }
     }
 }

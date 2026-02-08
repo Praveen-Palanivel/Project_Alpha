@@ -50,10 +50,17 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LocalStreamApp(
-    localStreamViewModel: LocalStreamViewModel = viewModel()
-) {
+fun LocalStreamApp() {
     val context = LocalContext.current
+    
+    // Use the real QuicTransferCoreAdapter instead of FakeTransferCoreAdapter
+    val localStreamViewModel: LocalStreamViewModel = viewModel(
+        factory = LocalStreamViewModel.Factory(
+            context = context.applicationContext,
+            useFakeAdapter = false  // Set to true during development/testing
+        )
+    )
+    
     val uiState by localStreamViewModel.uiState.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
