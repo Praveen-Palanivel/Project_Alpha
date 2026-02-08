@@ -66,6 +66,16 @@ from .compatibility import (
     sanitize_device_name,
 )
 
+from .performance import (
+    PerformanceConfig,
+    TransferStats,
+    SpeedMonitor,
+    auto_tune_config,
+    calculate_optimal_chunk_size,
+    create_performance_report,
+    get_quic_config_kwargs,
+)
+
 __version__ = "1.0.0"
 __all__ = [
     # Types
@@ -109,4 +119,12 @@ __all__ = [
     "get_default_save_directory",
     "get_capabilities",
     "sanitize_device_name",
+    # Performance
+    "PerformanceConfig",
+    "TransferStats",
+    "SpeedMonitor",
+    "auto_tune_config",
+    "calculate_optimal_chunk_size",
+    "create_performance_report",
+    "get_quic_config_kwargs",
 ]
