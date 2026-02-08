@@ -13,8 +13,10 @@ import com.localstream.android.ui.model.ConnectionType
 import com.localstream.android.ui.model.LocalStreamMode
 import com.localstream.android.ui.model.LocalStreamUiState
 import com.localstream.android.ui.model.PeerDevice
+import com.localstream.android.ui.model.PendingTransfer
 import com.localstream.android.ui.model.TransferSnapshot
 import com.localstream.android.ui.model.TransferStatus
+import com.localstream.android.ui.model.TransportMode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,6 +34,10 @@ class LocalStreamViewModel(
     val uiState: StateFlow<LocalStreamUiState> = _uiState.asStateFlow()
 
     private var lastTransferMode: LocalStreamMode = LocalStreamMode.SEND
+    
+    // Cast for background server access
+    private val quicAdapter: QuicTransferCoreAdapter?
+        get() = transferCoreAdapter as? QuicTransferCoreAdapter
 
     init {
         checkConnection()
@@ -60,9 +66,12 @@ class LocalStreamViewModel(
             )
         }
         
-        // Auto-start discovery if connected
+        // Auto-start background server if connected and in receive mode
         if (status.isConnected) {
             refreshDevices()
+            if (_uiState.value.mode == LocalStreamMode.RECEIVE) {
+                startBackgroundServer()
+            }
         }
     }
     
@@ -83,6 +92,23 @@ class LocalStreamViewModel(
     }
 
     // ==========================================================================
+    // Transport Mode Selection
+    // ==========================================================================
+    
+    fun setTransportMode(mode: TransportMode) {
+        _uiState.update { 
+            it.copy(
+                transportMode = mode,
+                lastActionHint = when (mode) {
+                    TransportMode.WIFI -> "WiFi selected - connect to same network"
+                    TransportMode.HOTSPOT -> "Hotspot selected - create hotspot for receiver"
+                    TransportMode.BLUETOOTH -> "Bluetooth selected - slower, for small files"
+                }
+            )
+        }
+    }
+
+    // ==========================================================================
     // Mode Selection
     // ==========================================================================
     
@@ -92,21 +118,134 @@ class LocalStreamViewModel(
         // Check connection and show prompt if needed
         checkConnection()
         
-        // Auto-start receive server when in receive mode
+        // Auto-start background server when in receive mode
         if (mode == LocalStreamMode.RECEIVE && _uiState.value.connection.isConnected) {
-            startReceiveInBackground()
+            startBackgroundServer()
+        } else if (mode == LocalStreamMode.SEND) {
+            // Stop background server when switching to send mode
+            stopBackgroundServer()
         }
     }
     
-    private fun startReceiveInBackground() {
-        viewModelScope.launch {
-            // Small delay to allow UI to update
-            delay(500)
-            if (_uiState.value.mode == LocalStreamMode.RECEIVE && 
-                _uiState.value.transfer.status == TransferStatus.IDLE) {
-                startReceive()
-            }
+    // ==========================================================================
+    // Background Server (Auto-Accept Flow)
+    // ==========================================================================
+    
+    private fun startBackgroundServer() {
+        val adapter = quicAdapter ?: return
+        
+        if (adapter.isBackgroundServerRunning()) {
+            _uiState.update { it.copy(isServerRunning = true) }
+            return
         }
+        
+        adapter.startBackgroundServer(
+            onIncoming = { pending ->
+                // Show accept/reject dialog
+                _uiState.update {
+                    it.copy(
+                        pendingTransfer = pending,
+                        showAcceptDialog = true,
+                        transfer = it.transfer.copy(
+                            status = TransferStatus.WAITING_ACCEPT,
+                            fileName = pending.fileName,
+                            totalBytes = pending.fileSize
+                        ),
+                        lastActionHint = "Incoming: ${pending.fileName} (${formatBytes(pending.fileSize)}) from ${pending.senderName}"
+                    )
+                }
+            },
+            onProgress = { transferred, total, speed ->
+                updateTransferProgress(transferred, total, speed)
+            },
+            onComplete = {
+                _uiState.update {
+                    it.copy(
+                        transfer = it.transfer.copy(
+                            status = TransferStatus.COMPLETED,
+                            speedBytesPerSec = 0L
+                        ),
+                        pendingTransfer = null,
+                        showAcceptDialog = false,
+                        lastActionHint = "File saved to Downloads/project_alpha!"
+                    )
+                }
+            },
+            onError = { error ->
+                _uiState.update {
+                    it.copy(
+                        transfer = it.transfer.copy(
+                            status = TransferStatus.FAILED,
+                            errorMessage = error,
+                            speedBytesPerSec = 0L
+                        ),
+                        pendingTransfer = null,
+                        showAcceptDialog = false,
+                        lastActionHint = "Transfer failed: $error"
+                    )
+                }
+            }
+        )
+        
+        _uiState.update { 
+            it.copy(
+                isServerRunning = true,
+                lastActionHint = "Ready to receive. Your IP: ${it.connection.localIpAddress ?: "Unknown"}"
+            )
+        }
+    }
+    
+    private fun stopBackgroundServer() {
+        quicAdapter?.stopBackgroundServer()
+        _uiState.update { 
+            it.copy(
+                isServerRunning = false,
+                showAcceptDialog = false,
+                pendingTransfer = null
+            )
+        }
+    }
+    
+    /**
+     * Accept the pending incoming transfer.
+     */
+    fun acceptIncomingTransfer() {
+        val adapter = quicAdapter ?: return
+        
+        _uiState.update {
+            it.copy(
+                showAcceptDialog = false,
+                transfer = it.transfer.copy(
+                    status = TransferStatus.TRANSFERRING
+                ),
+                lastActionHint = "Receiving file..."
+            )
+        }
+        
+        adapter.acceptTransfer()
+    }
+    
+    /**
+     * Reject the pending incoming transfer.
+     */
+    fun rejectIncomingTransfer() {
+        val adapter = quicAdapter ?: return
+        
+        _uiState.update {
+            it.copy(
+                showAcceptDialog = false,
+                pendingTransfer = null,
+                transfer = TransferSnapshot(),
+                lastActionHint = "Transfer rejected"
+            )
+        }
+        
+        adapter.rejectTransfer()
+    }
+    
+    fun dismissAcceptDialog() {
+        // Same as reject
+        rejectIncomingTransfer()
     }
 
     // ==========================================================================
@@ -266,47 +405,9 @@ class LocalStreamViewModel(
         }
         
         lastTransferMode = LocalStreamMode.RECEIVE
-        _uiState.update {
-            it.copy(
-                transfer = TransferSnapshot(
-                    status = TransferStatus.PREPARING,
-                    fileName = "Waiting for incoming file...",
-                    transferredBytes = 0L,
-                    totalBytes = 0L
-                ),
-                lastActionHint = "Ready to receive. Your IP: ${state.connection.localIpAddress ?: "Unknown"}"
-            )
-        }
-
-        transferCoreAdapter.startReceive(
-            savePath = "",  // Will use public Downloads folder
-            onProgress = { transferred, total, speed ->
-                updateTransferProgress(transferred, total, speed)
-            },
-            onComplete = {
-                _uiState.update {
-                    it.copy(
-                        transfer = it.transfer.copy(
-                            status = TransferStatus.COMPLETED,
-                            speedBytesPerSec = 0L
-                        ),
-                        lastActionHint = "File received and saved to Downloads!"
-                    )
-                }
-            },
-            onError = { error ->
-                _uiState.update {
-                    it.copy(
-                        transfer = it.transfer.copy(
-                            status = TransferStatus.FAILED,
-                            errorMessage = error,
-                            speedBytesPerSec = 0L
-                        ),
-                        lastActionHint = "Receive failed: $error"
-                    )
-                }
-            }
-        )
+        
+        // Just start the background server
+        startBackgroundServer()
     }
 
     fun cancelTransfer() {
@@ -317,6 +418,8 @@ class LocalStreamViewModel(
                     status = TransferStatus.CANCELLED,
                     speedBytesPerSec = 0L
                 ),
+                showAcceptDialog = false,
+                pendingTransfer = null,
                 lastActionHint = "Transfer cancelled"
             )
         }
@@ -353,6 +456,19 @@ class LocalStreamViewModel(
                 ),
                 lastActionHint = "Transferring: $percent% @ $speedMbps MB/s"
             )
+        }
+    }
+    
+    private fun formatBytes(bytes: Long): String {
+        if (bytes <= 0L) return "0 B"
+        val kb = 1024.0
+        val mb = kb * 1024.0
+        val gb = mb * 1024.0
+        return when {
+            bytes >= gb -> "%.1f GB".format(bytes / gb)
+            bytes >= mb -> "%.1f MB".format(bytes / mb)
+            bytes >= kb -> "%.1f KB".format(bytes / kb)
+            else -> "$bytes B"
         }
     }
     

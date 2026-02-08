@@ -8,6 +8,7 @@ import android.net.wifi.WifiManager
 import android.os.Environment
 import android.util.Log
 import com.localstream.android.ui.model.PeerDevice
+import com.localstream.android.ui.model.PendingTransfer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -28,8 +29,6 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.channels.FileChannel
-import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -37,13 +36,13 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
 
 /**
- * High-performance implementation of TransferCoreAdapter.
+ * High-performance transfer adapter optimized for 100+ MB/s.
  * 
  * Features:
- * - Bidirectional UDP discovery (both devices find each other)
- * - Optimized for maximum speed (100+ MB/s on Gigabit LAN)
- * - Large file support (>1GB) via direct streaming
- * - Role-based workflow support
+ * - Background server with auto-accept prompts
+ * - 16MB chunks, 64MB socket buffers
+ * - Direct streaming without intermediate buffering
+ * - Saves to Downloads/project_alpha folder
  */
 class QuicTransferCoreAdapter(
     private val context: Context,
@@ -58,11 +57,10 @@ class QuicTransferCoreAdapter(
         const val DEFAULT_PORT = 42424
         const val DISCOVERY_PORT = 42425
         
-        // Speed optimization: larger chunks and buffers
-        const val CHUNK_SIZE = 8 * 1024 * 1024  // 8 MB chunks for speed
-        const val SOCKET_BUFFER_SIZE = 32 * 1024 * 1024  // 32 MB socket buffers
-        const val IO_BUFFER_SIZE = 64 * 1024  // 64 KB I/O buffer
-        const val PARALLEL_STREAMS = 4
+        // SPEED OPTIMIZATION: Maximum throughput settings
+        const val CHUNK_SIZE = 16 * 1024 * 1024  // 16 MB chunks for max speed
+        const val SOCKET_BUFFER_SIZE = 64 * 1024 * 1024  // 64 MB socket buffers
+        const val RAW_IO_BUFFER_SIZE = 256 * 1024  // 256 KB raw I/O buffer
         
         // Message types
         const val MSG_HELLO = 0x01
@@ -71,56 +69,332 @@ class QuicTransferCoreAdapter(
         const val MSG_FILE_ACCEPT = 0x11
         const val MSG_FILE_REJECT = 0x12
         const val MSG_CHUNK_DATA = 0x20
-        const val MSG_CHUNK_ACK = 0x21
         const val MSG_TRANSFER_COMPLETE = 0x30
         const val MSG_TRANSFER_VERIFIED = 0x31
         const val MSG_CANCEL = 0x40
-        const val MSG_ERROR = 0xFF
         
-        // Discovery message types
+        // Discovery
         const val DISCOVERY_ANNOUNCE = 0x01
         const val DISCOVERY_SEARCH = 0x02
         const val DISCOVERY_RESPONSE = 0x03
-        
-        // Discovery timing
         const val DISCOVERY_ANNOUNCE_INTERVAL_MS = 2000L
         const val DISCOVERY_LISTEN_DURATION_MS = 10000L
+        
+        // Save folder
+        const val SAVE_FOLDER_NAME = "project_alpha"
     }
     
-    // Jobs for various operations
+    // Jobs
     private var activeTransferJob: Job? = null
     private var discoveryListenerJob: Job? = null
     private var discoveryBroadcasterJob: Job? = null
-    private var receiveServerJob: Job? = null
+    private var backgroundServerJob: Job? = null
     
-    // Speed tracking with atomics for thread safety
+    // Speed tracking
     private val speedBytesPerSec = AtomicLong(0L)
     private val totalBytesTransferred = AtomicLong(0L)
     private var transferStartTime: Long = 0L
     
-    // Device identification
+    // Device info
     private val deviceId: String = UUID.randomUUID().toString().take(8)
     private val deviceName: String = android.os.Build.MODEL
     
-    // Discovered devices
+    // Discovery
     private val discoveredDevices = ConcurrentHashMap<String, PeerDevice>()
-    
-    // Discovery running state
     private val isDiscoveryRunning = AtomicBoolean(false)
     
+    // Background server state
+    private val isServerRunning = AtomicBoolean(false)
+    private var pendingSocket: Socket? = null
+    private var pendingTransferInfo: PendingTransfer? = null
+    
+    // Callbacks for accept/reject flow
+    private var onIncomingTransferCallback: ((PendingTransfer) -> Unit)? = null
+    private var onTransferProgressCallback: ((Long, Long, Long) -> Unit)? = null
+    private var onTransferCompleteCallback: (() -> Unit)? = null
+    private var onTransferErrorCallback: ((String) -> Unit)? = null
+
     // ==========================================================================
-    // Bidirectional Device Discovery
+    // Background Server (Auto-Accept Prompt)
+    // ==========================================================================
+    
+    /**
+     * Start background server that listens for incoming connections.
+     * When a sender connects, calls onIncoming with file info for accept/reject.
+     */
+    fun startBackgroundServer(
+        onIncoming: (PendingTransfer) -> Unit,
+        onProgress: (Long, Long, Long) -> Unit,
+        onComplete: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        if (isServerRunning.get()) {
+            Log.d(TAG, "Server already running")
+            return
+        }
+        
+        onIncomingTransferCallback = onIncoming
+        onTransferProgressCallback = onProgress
+        onTransferCompleteCallback = onComplete
+        onTransferErrorCallback = onError
+        
+        isServerRunning.set(true)
+        
+        backgroundServerJob = scope.launch(Dispatchers.IO) {
+            var serverSocket: ServerSocket? = null
+            try {
+                serverSocket = ServerSocket()
+                serverSocket.reuseAddress = true
+                serverSocket.bind(InetSocketAddress(DEFAULT_PORT))
+                serverSocket.soTimeout = 2000  // Check for shutdown every 2 seconds
+                
+                Log.d(TAG, "Background server started on port $DEFAULT_PORT")
+                
+                while (isActive && isServerRunning.get()) {
+                    try {
+                        val clientSocket = serverSocket.accept()
+                        Log.d(TAG, "Incoming connection from ${clientSocket.inetAddress.hostAddress}")
+                        
+                        // Handle connection - read handshake and prompt user
+                        handleIncomingConnection(clientSocket)
+                        
+                    } catch (e: java.net.SocketTimeoutException) {
+                        // Expected - check if should continue
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Background server error", e)
+                withContext(Dispatchers.Main) {
+                    onError("Server error: ${e.message}")
+                }
+            } finally {
+                serverSocket?.close()
+                isServerRunning.set(false)
+                Log.d(TAG, "Background server stopped")
+            }
+        }
+    }
+    
+    private suspend fun handleIncomingConnection(clientSocket: Socket) {
+        try {
+            // Configure for max speed
+            clientSocket.receiveBufferSize = SOCKET_BUFFER_SIZE
+            clientSocket.sendBufferSize = SOCKET_BUFFER_SIZE
+            clientSocket.tcpNoDelay = true
+            
+            val input = clientSocket.getInputStream()
+            val output = clientSocket.getOutputStream()
+            
+            // Read HELLO
+            val helloBuffer = ByteArray(4096)
+            val helloLen = input.read(helloBuffer)
+            if (helloLen <= 4 || helloBuffer[4].toInt() != MSG_HELLO) {
+                Log.e(TAG, "Invalid HELLO")
+                clientSocket.close()
+                return
+            }
+            
+            // Parse sender info from HELLO
+            val helloJson = String(helloBuffer, 5, helloLen - 5)
+            val senderName = Regex("\"device_name\":\"([^\"]+)\"").find(helloJson)?.groupValues?.get(1) ?: "Unknown"
+            val senderIp = clientSocket.inetAddress.hostAddress ?: "Unknown"
+            
+            // Send HELLO_ACK
+            val ackPayload = "{\"accepted\":true,\"device_id\":\"$deviceId\",\"device_name\":\"$deviceName\"}".toByteArray()
+            output.write(buildMessage(MSG_HELLO_ACK, ackPayload))
+            output.flush()
+            
+            // Read FILE_OFFER
+            val offerBuffer = ByteArray(4096)
+            val offerLen = input.read(offerBuffer)
+            if (offerLen <= 4 || offerBuffer[4].toInt() != MSG_FILE_OFFER) {
+                Log.e(TAG, "Invalid FILE_OFFER")
+                clientSocket.close()
+                return
+            }
+            
+            // Parse file info
+            val offerJson = String(offerBuffer, 5, offerLen - 5)
+            val fileName = Regex("\"file_name\":\"([^\"]+)\"").find(offerJson)?.groupValues?.get(1) ?: "unknown"
+            val fileSize = Regex("\"file_size\":([0-9]+)").find(offerJson)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+            val transferId = Regex("\"transfer_id\":\"([^\"]+)\"").find(offerJson)?.groupValues?.get(1) ?: UUID.randomUUID().toString()
+            
+            Log.d(TAG, "Incoming file: $fileName ($fileSize bytes) from $senderName")
+            
+            // Store pending connection for accept/reject
+            pendingSocket = clientSocket
+            pendingTransferInfo = PendingTransfer(
+                transferId = transferId,
+                fileName = fileName,
+                fileSize = fileSize,
+                senderName = senderName,
+                senderIp = senderIp
+            )
+            
+            // Notify UI to show accept/reject dialog
+            withContext(Dispatchers.Main) {
+                onIncomingTransferCallback?.invoke(pendingTransferInfo!!)
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling incoming connection", e)
+            clientSocket.close()
+        }
+    }
+    
+    /**
+     * Accept the pending incoming transfer.
+     */
+    fun acceptTransfer() {
+        val socket = pendingSocket ?: return
+        val info = pendingTransferInfo ?: return
+        
+        activeTransferJob = scope.launch(Dispatchers.IO) {
+            var fileOutputStream: FileOutputStream? = null
+            try {
+                val output = socket.getOutputStream()
+                val input = socket.getInputStream()
+                
+                // Send FILE_ACCEPT
+                val acceptPayload = "{\"accepted\":true}".toByteArray()
+                output.write(buildMessage(MSG_FILE_ACCEPT, acceptPayload))
+                output.flush()
+                
+                // Resolve save file - Downloads/project_alpha/
+                val saveFile = resolveSaveFile(info.fileName)
+                Log.d(TAG, "Saving to: ${saveFile.absolutePath}")
+                
+                // Initialize
+                transferStartTime = System.currentTimeMillis()
+                totalBytesTransferred.set(0L)
+                speedBytesPerSec.set(0L)
+                
+                fileOutputStream = FileOutputStream(saveFile)
+                val fileChannel = fileOutputStream.channel
+                
+                // Receive with optimized I/O
+                val headerBuffer = ByteArray(12)
+                val chunkBuffer = ByteArray(CHUNK_SIZE)
+                var lastProgressTime = System.currentTimeMillis()
+                var bytesInPeriod = 0L
+                val totalBytes = info.fileSize
+                
+                while (isActive && totalBytesTransferred.get() < totalBytes) {
+                    // Read chunk header
+                    if (!readFully(input, headerBuffer, 12)) break
+                    
+                    val headerBuf = ByteBuffer.wrap(headerBuffer).order(ByteOrder.BIG_ENDIAN)
+                    val chunkIndex = headerBuf.getInt()
+                    val chunkSize = headerBuf.getInt()
+                    
+                    if (chunkSize <= 0 || chunkSize > CHUNK_SIZE) break
+                    
+                    // Read chunk data in optimal-size pieces
+                    if (!readFully(input, chunkBuffer, chunkSize)) break
+                    
+                    // Write directly
+                    val writeBuffer = ByteBuffer.wrap(chunkBuffer, 0, chunkSize)
+                    fileChannel.write(writeBuffer)
+                    
+                    val currentTotal = totalBytesTransferred.addAndGet(chunkSize.toLong())
+                    bytesInPeriod += chunkSize
+                    
+                    // Update speed
+                    val now = System.currentTimeMillis()
+                    if (now - lastProgressTime >= 150) {
+                        val elapsed = now - lastProgressTime
+                        val speed = if (elapsed > 0) (bytesInPeriod * 1000) / elapsed else 0L
+                        speedBytesPerSec.set(speed)
+                        bytesInPeriod = 0L
+                        lastProgressTime = now
+                        
+                        withContext(Dispatchers.Main) {
+                            onTransferProgressCallback?.invoke(currentTotal, totalBytes, speed)
+                        }
+                    }
+                }
+                
+                fileChannel.force(true)
+                fileOutputStream.close()
+                fileOutputStream = null
+                
+                // Read TRANSFER_COMPLETE
+                val completeBuffer = ByteArray(256)
+                runCatching { input.read(completeBuffer) }
+                
+                // Send verification
+                val verified = saveFile.length() >= totalBytes * 0.99
+                val verifyMsg = buildMessage(MSG_TRANSFER_VERIFIED, "{\"verified\":$verified}".toByteArray())
+                output.write(verifyMsg)
+                output.flush()
+                
+                speedBytesPerSec.set(0L)
+                
+                if (verified) {
+                    val avgSpeed = if (System.currentTimeMillis() - transferStartTime > 0) {
+                        (totalBytes * 1000) / (System.currentTimeMillis() - transferStartTime)
+                    } else 0L
+                    Log.d(TAG, "Transfer complete! Saved: ${saveFile.absolutePath}, Avg: ${avgSpeed / 1024 / 1024} MB/s")
+                    withContext(Dispatchers.Main) { onTransferCompleteCallback?.invoke() }
+                } else {
+                    withContext(Dispatchers.Main) { onTransferErrorCallback?.invoke("Verification failed") }
+                }
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Accept transfer error", e)
+                speedBytesPerSec.set(0L)
+                withContext(Dispatchers.Main) { onTransferErrorCallback?.invoke(e.message ?: "Transfer failed") }
+            } finally {
+                runCatching { fileOutputStream?.close() }
+                runCatching { socket.close() }
+                pendingSocket = null
+                pendingTransferInfo = null
+            }
+        }
+    }
+    
+    /**
+     * Reject the pending incoming transfer.
+     */
+    fun rejectTransfer() {
+        val socket = pendingSocket ?: return
+        
+        scope.launch(Dispatchers.IO) {
+            try {
+                val output = socket.getOutputStream()
+                val rejectPayload = "{\"accepted\":false}".toByteArray()
+                output.write(buildMessage(MSG_FILE_REJECT, rejectPayload))
+                output.flush()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error sending reject", e)
+            } finally {
+                socket.close()
+                pendingSocket = null
+                pendingTransferInfo = null
+            }
+        }
+    }
+    
+    fun stopBackgroundServer() {
+        isServerRunning.set(false)
+        backgroundServerJob?.cancel()
+        backgroundServerJob = null
+        pendingSocket?.close()
+        pendingSocket = null
+        pendingTransferInfo = null
+    }
+    
+    fun isBackgroundServerRunning(): Boolean = isServerRunning.get()
+
+    // ==========================================================================
+    // Device Discovery
     // ==========================================================================
     
     override fun discoverDevices(onFound: (PeerDevice) -> Unit) {
         stopDiscovery()
         discoveredDevices.clear()
         isDiscoveryRunning.set(true)
-        
-        // Start background listener for incoming discovery packets
         startDiscoveryListener(onFound)
-        
-        // Start broadcaster to announce our presence
         startDiscoveryBroadcaster()
     }
     
@@ -130,7 +404,7 @@ class QuicTransferCoreAdapter(
             try {
                 socket = DatagramSocket(DISCOVERY_PORT)
                 socket.broadcast = true
-                socket.soTimeout = 500  // 500ms timeout for responsive shutdown
+                socket.soTimeout = 500
                 socket.reuseAddress = true
                 
                 Log.d(TAG, "Discovery listener started on port $DISCOVERY_PORT")
@@ -145,17 +419,15 @@ class QuicTransferCoreAdapter(
                         socket.receive(packet)
                         val sourceIp = packet.address.hostAddress ?: continue
                         val data = buffer.copyOf(packet.length)
-                        
                         handleDiscoveryPacket(data, sourceIp, socket, onFound)
                     } catch (e: java.net.SocketTimeoutException) {
-                        // Expected - continue listening
+                        // Expected
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Discovery listener error", e)
             } finally {
                 socket?.close()
-                Log.d(TAG, "Discovery listener stopped")
             }
         }
     }
@@ -168,27 +440,16 @@ class QuicTransferCoreAdapter(
                 socket.broadcast = true
                 
                 val broadcastAddr = getBroadcastAddress()
-                Log.d(TAG, "Discovery broadcaster started, target: $broadcastAddr")
                 
                 while (isActive && isDiscoveryRunning.get()) {
                     try {
-                        // Send search packet
                         val searchPacket = buildDiscoverySearch()
-                        socket.send(DatagramPacket(
-                            searchPacket,
-                            searchPacket.size,
-                            InetAddress.getByName(broadcastAddr),
-                            DISCOVERY_PORT
-                        ))
+                        socket.send(DatagramPacket(searchPacket, searchPacket.size, 
+                            InetAddress.getByName(broadcastAddr), DISCOVERY_PORT))
                         
-                        // Send announce packet
                         val announcePacket = buildDiscoveryAnnounce()
-                        socket.send(DatagramPacket(
-                            announcePacket,
-                            announcePacket.size,
-                            InetAddress.getByName(broadcastAddr),
-                            DISCOVERY_PORT
-                        ))
+                        socket.send(DatagramPacket(announcePacket, announcePacket.size,
+                            InetAddress.getByName(broadcastAddr), DISCOVERY_PORT))
                         
                         delay(DISCOVERY_ANNOUNCE_INTERVAL_MS)
                     } catch (e: Exception) {
@@ -200,7 +461,6 @@ class QuicTransferCoreAdapter(
                 Log.e(TAG, "Discovery broadcaster error", e)
             } finally {
                 socket?.close()
-                Log.d(TAG, "Discovery broadcaster stopped")
             }
         }
     }
@@ -212,29 +472,19 @@ class QuicTransferCoreAdapter(
         onFound: (PeerDevice) -> Unit
     ) {
         if (data.isEmpty()) return
-        
         val msgType = data[0].toInt() and 0xFF
         
         when (msgType) {
             DISCOVERY_SEARCH -> {
-                // Someone is searching - send response directly to them
                 val response = buildDiscoveryResponse()
-                socket.send(DatagramPacket(
-                    response,
-                    response.size,
-                    InetAddress.getByName(sourceIp),
-                    DISCOVERY_PORT
-                ))
+                socket.send(DatagramPacket(response, response.size,
+                    InetAddress.getByName(sourceIp), DISCOVERY_PORT))
             }
             DISCOVERY_ANNOUNCE, DISCOVERY_RESPONSE -> {
-                // Parse device info
                 parseDiscoveryPacket(data, sourceIp)?.let { device ->
                     if (device.id != deviceId && !discoveredDevices.containsKey(device.id)) {
                         discoveredDevices[device.id] = device
-                        Log.d(TAG, "Discovered device: ${device.displayName} at ${device.ipAddress}")
-                        withContext(Dispatchers.Main) {
-                            onFound(device)
-                        }
+                        withContext(Dispatchers.Main) { onFound(device) }
                     }
                 }
             }
@@ -245,8 +495,6 @@ class QuicTransferCoreAdapter(
         isDiscoveryRunning.set(false)
         discoveryListenerJob?.cancel()
         discoveryBroadcasterJob?.cancel()
-        discoveryListenerJob = null
-        discoveryBroadcasterJob = null
     }
     
     private fun getBroadcastAddress(): String {
@@ -255,39 +503,28 @@ class QuicTransferCoreAdapter(
             val dhcpInfo = wifiManager.dhcpInfo
             if (dhcpInfo.ipAddress != 0) {
                 val broadcast = (dhcpInfo.ipAddress and dhcpInfo.netmask) or dhcpInfo.netmask.inv()
-                return String.format(
-                    "%d.%d.%d.%d",
-                    broadcast and 0xff,
-                    (broadcast shr 8) and 0xff,
-                    (broadcast shr 16) and 0xff,
-                    (broadcast shr 24) and 0xff
-                )
+                return String.format("%d.%d.%d.%d",
+                    broadcast and 0xff, (broadcast shr 8) and 0xff,
+                    (broadcast shr 16) and 0xff, (broadcast shr 24) and 0xff)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to get broadcast address", e)
         }
-        return "255.255.255.255"  // Fallback to global broadcast
+        return "255.255.255.255"
     }
     
-    private fun buildDiscoveryAnnounce(): ByteArray {
-        return buildDiscoveryMessage(DISCOVERY_ANNOUNCE)
-    }
-    
+    private fun buildDiscoveryAnnounce() = buildDiscoveryMessage(DISCOVERY_ANNOUNCE)
     private fun buildDiscoverySearch(): ByteArray {
         val buffer = ByteBuffer.allocate(64).order(ByteOrder.BIG_ENDIAN)
         buffer.put(DISCOVERY_SEARCH.toByte())
         buffer.putShort(deviceId.length.toShort())
         buffer.put(deviceId.toByteArray())
-        
         val result = ByteArray(buffer.position())
         buffer.flip()
         buffer.get(result)
         return result
     }
-    
-    private fun buildDiscoveryResponse(): ByteArray {
-        return buildDiscoveryMessage(DISCOVERY_RESPONSE)
-    }
+    private fun buildDiscoveryResponse() = buildDiscoveryMessage(DISCOVERY_RESPONSE)
     
     private fun buildDiscoveryMessage(type: Int): ByteArray {
         val buffer = ByteBuffer.allocate(256).order(ByteOrder.BIG_ENDIAN)
@@ -299,7 +536,6 @@ class QuicTransferCoreAdapter(
         buffer.putShort(deviceName.length.toShort())
         buffer.put(deviceName.toByteArray())
         buffer.putShort(DEFAULT_PORT.toShort())
-        
         val result = ByteArray(buffer.position())
         buffer.flip()
         buffer.get(result)
@@ -308,43 +544,25 @@ class QuicTransferCoreAdapter(
     
     private fun parseDiscoveryPacket(data: ByteArray, sourceIp: String): PeerDevice? {
         if (data.size < 10) return null
-        
         try {
             val buffer = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN)
-            buffer.get()  // Skip message type
-            
-            // Read protocol version
+            buffer.get()
             val versionLen = buffer.short.toInt() and 0xFFFF
             if (versionLen > 100) return null
-            val versionBytes = ByteArray(versionLen)
-            buffer.get(versionBytes)
-            
-            // Read device ID
+            buffer.position(buffer.position() + versionLen)
             val idLen = buffer.short.toInt() and 0xFFFF
             if (idLen > 100) return null
             val idBytes = ByteArray(idLen)
             buffer.get(idBytes)
-            val peerId = String(idBytes)
-            
-            // Read device name
             val nameLen = buffer.short.toInt() and 0xFFFF
             if (nameLen > 200) return null
             val nameBytes = ByteArray(nameLen)
             buffer.get(nameBytes)
-            val peerName = String(nameBytes)
-            
-            return PeerDevice(
-                id = peerId,
-                displayName = peerName,
-                ipAddress = sourceIp,
-                protocol = "QUIC"
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to parse discovery packet", e)
-            return null
-        }
+            return PeerDevice(id = String(idBytes), displayName = String(nameBytes), 
+                ipAddress = sourceIp, protocol = "QUIC")
+        } catch (e: Exception) { return null }
     }
-    
+
     // ==========================================================================
     // High-Speed File Sending
     // ==========================================================================
@@ -363,48 +581,42 @@ class QuicTransferCoreAdapter(
             var inputStream: InputStream? = null
             
             try {
-                // Resolve source - supports content:// URIs and file paths
                 val sourceInfo = resolveSource(filePath)
                 if (sourceInfo == null) {
-                    withContext(Dispatchers.Main) { onError("File not found or cannot be accessed") }
+                    withContext(Dispatchers.Main) { onError("File not found") }
                     return@launch
                 }
                 
                 val (stream, fileName, totalBytes) = sourceInfo
                 inputStream = stream
                 
-                if (totalBytes <= 0) {
-                    withContext(Dispatchers.Main) { onError("Cannot determine file size") }
-                    return@launch
-                }
-                
-                // Initialize tracking
                 transferStartTime = System.currentTimeMillis()
                 totalBytesTransferred.set(0L)
                 speedBytesPerSec.set(0L)
                 
                 Log.d(TAG, "Connecting to $targetIp:$DEFAULT_PORT for $fileName ($totalBytes bytes)")
                 
-                // Connect with optimized socket settings
+                // Connect with MAX SPEED settings
                 socket = Socket()
                 socket.connect(InetSocketAddress(targetIp, DEFAULT_PORT), 10000)
-                socket.tcpNoDelay = true
+                socket.tcpNoDelay = true  // Disable Nagle's algorithm
                 socket.sendBufferSize = SOCKET_BUFFER_SIZE
                 socket.receiveBufferSize = SOCKET_BUFFER_SIZE
                 socket.setSoLinger(true, 10)
                 
-                val output = socket.getOutputStream().buffered(IO_BUFFER_SIZE)
-                val input = socket.getInputStream().buffered(IO_BUFFER_SIZE)
+                // Use raw streams for maximum throughput
+                val output = socket.getOutputStream()
+                val input = socket.getInputStream()
                 
                 // Handshake
                 if (!performSenderHandshake(fileName, totalBytes, input, output)) {
-                    withContext(Dispatchers.Main) { onError("Handshake failed or file rejected") }
+                    withContext(Dispatchers.Main) { onError("Handshake failed or rejected") }
                     return@launch
                 }
                 
                 Log.d(TAG, "Handshake complete, starting high-speed transfer")
                 
-                // Transfer with optimized buffering
+                // Transfer with optimized 16MB chunks
                 val chunkBuffer = ByteArray(CHUNK_SIZE)
                 var offset = 0L
                 var chunkIndex = 0
@@ -415,45 +627,44 @@ class QuicTransferCoreAdapter(
                     val remaining = (totalBytes - offset).toInt()
                     val toRead = min(CHUNK_SIZE, remaining)
                     
-                    // Read from source stream
+                    // Read in optimal-size pieces
                     var bytesRead = 0
                     while (bytesRead < toRead) {
-                        val n = inputStream.read(chunkBuffer, bytesRead, toRead - bytesRead)
+                        val n = inputStream.read(chunkBuffer, bytesRead, min(RAW_IO_BUFFER_SIZE, toRead - bytesRead))
                         if (n < 0) break
                         bytesRead += n
                     }
                     
                     if (bytesRead <= 0) break
                     
-                    // Send chunk header + data (no flush until buffer full)
+                    // Send header + data in single write for efficiency
                     val header = buildChunkHeader(chunkIndex, bytesRead)
                     output.write(header)
                     output.write(chunkBuffer, 0, bytesRead)
+                    // NO FLUSH - let TCP buffer optimize
                     
                     offset += bytesRead
                     chunkIndex++
                     totalBytesTransferred.set(offset)
                     bytesInPeriod += bytesRead
                     
-                    // Update speed every 200ms
+                    // Update speed every 150ms for responsiveness
                     val now = System.currentTimeMillis()
-                    if (now - lastProgressTime >= 200) {
+                    if (now - lastProgressTime >= 150) {
                         val elapsed = now - lastProgressTime
                         val speed = if (elapsed > 0) (bytesInPeriod * 1000) / elapsed else 0L
                         speedBytesPerSec.set(speed)
                         bytesInPeriod = 0L
                         lastProgressTime = now
                         
-                        withContext(Dispatchers.Main) {
-                            onProgress(offset, totalBytes, speed)
-                        }
+                        withContext(Dispatchers.Main) { onProgress(offset, totalBytes, speed) }
                     }
                 }
                 
-                // Flush remaining data
+                // Final flush
                 output.flush()
                 
-                // Send transfer complete
+                // Transfer complete
                 val completeMsg = buildMessage(MSG_TRANSFER_COMPLETE, "{\"status\":\"complete\"}".toByteArray())
                 output.write(completeMsg)
                 output.flush()
@@ -468,7 +679,7 @@ class QuicTransferCoreAdapter(
                     val avgSpeed = if (System.currentTimeMillis() - transferStartTime > 0) {
                         (totalBytes * 1000) / (System.currentTimeMillis() - transferStartTime)
                     } else 0L
-                    Log.d(TAG, "Transfer complete! Average speed: ${avgSpeed / 1024 / 1024} MB/s")
+                    Log.d(TAG, "Transfer complete! Avg: ${avgSpeed / 1024 / 1024} MB/s")
                     withContext(Dispatchers.Main) { onComplete() }
                 } else {
                     withContext(Dispatchers.Main) { onError("Verification failed") }
@@ -486,54 +697,33 @@ class QuicTransferCoreAdapter(
     }
     
     private fun performSenderHandshake(
-        fileName: String,
-        totalBytes: Long,
-        input: InputStream,
-        output: OutputStream
+        fileName: String, totalBytes: Long,
+        input: InputStream, output: OutputStream
     ): Boolean {
-        // Send HELLO
-        val helloPayload = buildString {
-            append("{\"device_id\":\"$deviceId\",")
-            append("\"device_name\":\"$deviceName\",")
-            append("\"platform\":\"android\",")
-            append("\"protocol_version\":\"$PROTOCOL_VERSION\"}")
-        }.toByteArray()
+        // HELLO
+        val helloPayload = "{\"device_id\":\"$deviceId\",\"device_name\":\"$deviceName\",\"platform\":\"android\",\"protocol_version\":\"$PROTOCOL_VERSION\"}".toByteArray()
         output.write(buildMessage(MSG_HELLO, helloPayload))
         output.flush()
         
-        // Wait for HELLO_ACK
         val ackBuffer = ByteArray(1024)
         val ackLen = input.read(ackBuffer)
-        if (ackLen <= 4 || ackBuffer[4].toInt() != MSG_HELLO_ACK) {
-            Log.e(TAG, "HELLO_ACK not received")
-            return false
-        }
+        if (ackLen <= 4 || ackBuffer[4].toInt() != MSG_HELLO_ACK) return false
         
-        // Send FILE_OFFER
+        // FILE_OFFER
         val chunkCount = ((totalBytes + CHUNK_SIZE - 1) / CHUNK_SIZE).toInt()
-        val offerPayload = buildString {
-            append("{\"transfer_id\":\"${UUID.randomUUID()}\",")
-            append("\"file_name\":\"$fileName\",")
-            append("\"file_size\":$totalBytes,")
-            append("\"chunk_size\":$CHUNK_SIZE,")
-            append("\"chunk_count\":$chunkCount}")
-        }.toByteArray()
+        val offerPayload = "{\"transfer_id\":\"${UUID.randomUUID()}\",\"file_name\":\"$fileName\",\"file_size\":$totalBytes,\"chunk_size\":$CHUNK_SIZE,\"chunk_count\":$chunkCount}".toByteArray()
         output.write(buildMessage(MSG_FILE_OFFER, offerPayload))
         output.flush()
         
-        // Wait for FILE_ACCEPT
         val acceptBuffer = ByteArray(1024)
         val acceptLen = input.read(acceptBuffer)
-        if (acceptLen <= 4 || acceptBuffer[4].toInt() != MSG_FILE_ACCEPT) {
-            Log.e(TAG, "FILE_ACCEPT not received")
-            return false
-        }
+        if (acceptLen <= 4 || acceptBuffer[4].toInt() != MSG_FILE_ACCEPT) return false
         
         return true
     }
-    
+
     // ==========================================================================
-    // High-Speed File Receiving
+    // Legacy Receive (for manual start)
     // ==========================================================================
     
     override fun startReceive(
@@ -542,216 +732,41 @@ class QuicTransferCoreAdapter(
         onComplete: () -> Unit,
         onError: (String) -> Unit
     ) {
-        cancelActiveTransfer()
-        
-        receiveServerJob = scope.launch(Dispatchers.IO) {
-            var serverSocket: ServerSocket? = null
-            var clientSocket: Socket? = null
-            var fileOutputStream: FileOutputStream? = null
-            
-            try {
-                serverSocket = ServerSocket(DEFAULT_PORT)
-                serverSocket.reuseAddress = true
-                serverSocket.soTimeout = 120000  // 2 minute timeout for connection
-                
-                Log.d(TAG, "Receiver listening on port $DEFAULT_PORT")
-                
-                clientSocket = serverSocket.accept()
-                clientSocket.receiveBufferSize = SOCKET_BUFFER_SIZE
-                clientSocket.sendBufferSize = SOCKET_BUFFER_SIZE
-                clientSocket.tcpNoDelay = true
-                
-                val input = clientSocket.getInputStream().buffered(IO_BUFFER_SIZE)
-                val output = clientSocket.getOutputStream().buffered(IO_BUFFER_SIZE)
-                
-                // Perform receiver handshake
-                val fileInfo = performReceiverHandshake(input, output)
-                if (fileInfo == null) {
-                    withContext(Dispatchers.Main) { onError("Handshake failed") }
-                    return@launch
-                }
-                
-                val (fileName, totalBytes) = fileInfo
-                Log.d(TAG, "Receiving: $fileName ($totalBytes bytes)")
-                
-                // Resolve save location - use public Downloads folder
-                val saveFile = resolveSaveFile(savePath, fileName)
-                saveFile.parentFile?.mkdirs()
-                
-                Log.d(TAG, "Saving to: ${saveFile.absolutePath}")
-                
-                // Initialize tracking
-                transferStartTime = System.currentTimeMillis()
-                totalBytesTransferred.set(0L)
-                speedBytesPerSec.set(0L)
-                
-                // Open file for writing
-                fileOutputStream = FileOutputStream(saveFile)
-                val fileChannel = fileOutputStream.channel
-                
-                // Receive chunks
-                val headerBuffer = ByteArray(12)  // 4 chunk index + 4 size + 4 reserved
-                val chunkBuffer = ByteArray(CHUNK_SIZE)
-                var lastProgressTime = System.currentTimeMillis()
-                var bytesInPeriod = 0L
-                
-                while (isActive && totalBytesTransferred.get() < totalBytes) {
-                    // Read chunk header
-                    if (!readFully(input, headerBuffer, 12)) {
-                        // Check if transfer complete message
-                        break
-                    }
-                    
-                    // Check if this is TRANSFER_COMPLETE message instead
-                    val msgType = headerBuffer[4].toInt()
-                    if (msgType == MSG_TRANSFER_COMPLETE) {
-                        break
-                    }
-                    
-                    val headerBuf = ByteBuffer.wrap(headerBuffer).order(ByteOrder.BIG_ENDIAN)
-                    val chunkIndex = headerBuf.getInt()
-                    val chunkSize = headerBuf.getInt()
-                    
-                    if (chunkSize <= 0 || chunkSize > CHUNK_SIZE) {
-                        Log.w(TAG, "Invalid chunk size: $chunkSize")
-                        break
-                    }
-                    
-                    // Read chunk data
-                    if (!readFully(input, chunkBuffer, chunkSize)) {
-                        Log.e(TAG, "Failed to read chunk data")
-                        break
-                    }
-                    
-                    // Write directly using FileChannel for speed
-                    val writeBuffer = ByteBuffer.wrap(chunkBuffer, 0, chunkSize)
-                    fileChannel.write(writeBuffer)
-                    
-                    val currentTotal = totalBytesTransferred.addAndGet(chunkSize.toLong())
-                    bytesInPeriod += chunkSize
-                    
-                    // Update speed every 200ms
-                    val now = System.currentTimeMillis()
-                    if (now - lastProgressTime >= 200) {
-                        val elapsed = now - lastProgressTime
-                        val speed = if (elapsed > 0) (bytesInPeriod * 1000) / elapsed else 0L
-                        speedBytesPerSec.set(speed)
-                        bytesInPeriod = 0L
-                        lastProgressTime = now
-                        
-                        withContext(Dispatchers.Main) {
-                            onProgress(currentTotal, totalBytes, speed)
-                        }
-                    }
-                }
-                
-                // Ensure all data written
-                fileChannel.force(true)
-                fileOutputStream.close()
-                fileOutputStream = null
-                
-                // Read TRANSFER_COMPLETE if not already
-                val completeBuffer = ByteArray(256)
-                runCatching { input.read(completeBuffer) }
-                
-                // Send verification
-                val verified = saveFile.length() >= totalBytes * 0.99  // Allow 1% tolerance
-                val verifyMsg = buildMessage(
-                    MSG_TRANSFER_VERIFIED,
-                    "{\"verified\":$verified}".toByteArray()
-                )
-                output.write(verifyMsg)
-                output.flush()
-                
-                speedBytesPerSec.set(0L)
-                
-                if (verified) {
-                    val avgSpeed = if (System.currentTimeMillis() - transferStartTime > 0) {
-                        (totalBytes * 1000) / (System.currentTimeMillis() - transferStartTime)
-                    } else 0L
-                    Log.d(TAG, "Receive complete! File: ${saveFile.absolutePath}, Avg speed: ${avgSpeed / 1024 / 1024} MB/s")
-                    withContext(Dispatchers.Main) { onComplete() }
-                } else {
-                    withContext(Dispatchers.Main) { onError("Verification failed") }
-                }
-                
-            } catch (e: Exception) {
-                Log.e(TAG, "Receive error", e)
-                speedBytesPerSec.set(0L)
-                withContext(Dispatchers.Main) { onError(e.message ?: "Receive failed") }
-            } finally {
-                runCatching { fileOutputStream?.close() }
-                runCatching { clientSocket?.close() }
-                runCatching { serverSocket?.close() }
-            }
-        }
+        // Start background server which will handle incoming connections
+        startBackgroundServer(
+            onIncoming = { pending ->
+                // Auto-accept for legacy mode
+                acceptTransfer()
+            },
+            onProgress = onProgress,
+            onComplete = onComplete,
+            onError = onError
+        )
     }
     
-    private fun performReceiverHandshake(input: InputStream, output: OutputStream): Pair<String, Long>? {
-        // Read HELLO
-        val helloBuffer = ByteArray(1024)
-        val helloLen = input.read(helloBuffer)
-        if (helloLen <= 4 || helloBuffer[4].toInt() != MSG_HELLO) {
-            Log.e(TAG, "HELLO not received")
-            return null
-        }
-        
-        // Send HELLO_ACK
-        val ackPayload = "{\"accepted\":true,\"device_id\":\"$deviceId\",\"device_name\":\"$deviceName\"}".toByteArray()
-        output.write(buildMessage(MSG_HELLO_ACK, ackPayload))
-        output.flush()
-        
-        // Read FILE_OFFER
-        val offerBuffer = ByteArray(4096)
-        val offerLen = input.read(offerBuffer)
-        if (offerLen <= 4 || offerBuffer[4].toInt() != MSG_FILE_OFFER) {
-            Log.e(TAG, "FILE_OFFER not received")
-            return null
-        }
-        
-        // Parse file info
-        val jsonStr = String(offerBuffer, 5, offerLen - 5)
-        val fileName = Regex("\"file_name\":\"([^\"]+)\"").find(jsonStr)?.groupValues?.get(1) ?: "received_file"
-        val fileSize = Regex("\"file_size\":([0-9]+)").find(jsonStr)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
-        
-        // Send FILE_ACCEPT
-        val acceptPayload = "{\"accepted\":true}".toByteArray()
-        output.write(buildMessage(MSG_FILE_ACCEPT, acceptPayload))
-        output.flush()
-        
-        return Pair(fileName, fileSize)
+    override fun cancelActiveTransfer() {
+        activeTransferJob?.cancel()
+        activeTransferJob = null
+        stopBackgroundServer()
+        stopDiscovery()
+        speedBytesPerSec.set(0L)
     }
     
-    private fun readFully(input: InputStream, buffer: ByteArray, length: Int): Boolean {
-        var read = 0
-        while (read < length) {
-            val n = input.read(buffer, read, length - read)
-            if (n < 0) return false
-            read += n
-        }
-        return true
-    }
-    
+    override fun getTransferSpeed(): Long = speedBytesPerSec.get()
+
     // ==========================================================================
-    // Source Resolution (handles content:// URIs for large files)
+    // File Resolution
     // ==========================================================================
     
     private fun resolveSource(filePath: String): Triple<InputStream, String, Long>? {
-        // Try as direct file first
         val directFile = File(filePath)
         if (directFile.exists() && directFile.canRead()) {
-            return Triple(
-                FileInputStream(directFile),
-                directFile.name,
-                directFile.length()
-            )
+            return Triple(FileInputStream(directFile), directFile.name, directFile.length())
         }
         
-        // Try as content URI
         val uri = runCatching { Uri.parse(filePath) }.getOrNull() ?: return null
         if (uri.scheme != "content") return null
         
-        // Get file name
         val displayName = context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
             val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
             val sizeIndex = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
@@ -762,50 +777,50 @@ class QuicTransferCoreAdapter(
             } else null
         } ?: return null
         
-        val (fileName, fileSize) = displayName
-        
-        // Open stream directly - NO COPYING to temp file!
         val inputStream = context.contentResolver.openInputStream(uri) ?: return null
-        
-        return Triple(inputStream, fileName, fileSize)
+        return Triple(inputStream, displayName.first, displayName.second)
     }
     
-    // ==========================================================================
-    // Save File Resolution (saves to public Downloads)
-    // ==========================================================================
-    
-    private fun resolveSaveFile(savePath: String, fileName: String): File {
-        // Try public Downloads folder first
+    /**
+     * Resolve save file to Downloads/project_alpha folder.
+     */
+    private fun resolveSaveFile(fileName: String): File {
+        // Primary: Public Downloads/project_alpha
         val publicDownloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        if (publicDownloads.exists() || publicDownloads.mkdirs()) {
-            return File(publicDownloads, sanitizeFileName(fileName))
+        val projectAlphaDir = File(publicDownloads, SAVE_FOLDER_NAME)
+        
+        if (projectAlphaDir.exists() || projectAlphaDir.mkdirs()) {
+            return File(projectAlphaDir, sanitizeFileName(fileName))
         }
         
-        // Fallback to app-specific Downloads
+        // Fallback: App-specific Downloads
         val appDownloads = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
         if (appDownloads != null) {
-            return File(appDownloads, sanitizeFileName(fileName))
+            val appProjectAlpha = File(appDownloads, SAVE_FOLDER_NAME)
+            if (appProjectAlpha.exists() || appProjectAlpha.mkdirs()) {
+                return File(appProjectAlpha, sanitizeFileName(fileName))
+            }
         }
         
-        // Last resort: internal files dir
+        // Last resort
         return File(context.filesDir, sanitizeFileName(fileName))
     }
     
     private fun sanitizeFileName(name: String): String {
-        // Remove invalid characters
         var safe = name.replace(Regex("[<>:\"|?*\\\\]"), "_")
-        // Handle conflicts
-        val file = File(safe)
-        if (file.exists()) {
-            val baseName = file.nameWithoutExtension
-            val ext = file.extension
+        val baseDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val projectAlphaDir = File(baseDir, SAVE_FOLDER_NAME)
+        val targetFile = File(projectAlphaDir, safe)
+        if (targetFile.exists()) {
+            val baseName = targetFile.nameWithoutExtension
+            val ext = targetFile.extension
             safe = "${baseName}_${System.currentTimeMillis()}${if (ext.isNotEmpty()) ".$ext" else ""}"
         }
         return safe
     }
-    
+
     // ==========================================================================
-    // Message Building Utilities
+    // Message Building
     // ==========================================================================
     
     private fun buildMessage(msgType: Int, payload: ByteArray): ByteArray {
@@ -820,25 +835,20 @@ class QuicTransferCoreAdapter(
         val buffer = ByteBuffer.allocate(12).order(ByteOrder.BIG_ENDIAN)
         buffer.putInt(chunkIndex)
         buffer.putInt(chunkSize)
-        buffer.putInt(0)  // Reserved for future checksum
+        buffer.putInt(0)  // Reserved
         return buffer.array()
     }
     
-    // ==========================================================================
-    // Lifecycle Management
-    // ==========================================================================
-    
-    override fun cancelActiveTransfer() {
-        activeTransferJob?.cancel()
-        activeTransferJob = null
-        receiveServerJob?.cancel()
-        receiveServerJob = null
-        stopDiscovery()
-        speedBytesPerSec.set(0L)
+    private fun readFully(input: InputStream, buffer: ByteArray, length: Int): Boolean {
+        var read = 0
+        while (read < length) {
+            val n = input.read(buffer, read, length - read)
+            if (n < 0) return false
+            read += n
+        }
+        return true
     }
-    
-    override fun getTransferSpeed(): Long = speedBytesPerSec.get()
-    
+
     // ==========================================================================
     // Connectivity Helpers
     // ==========================================================================
@@ -850,33 +860,16 @@ class QuicTransferCoreAdapter(
         return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
     }
     
-    fun isHotspotEnabled(): Boolean {
-        val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        return try {
-            val method = wifiManager.javaClass.getDeclaredMethod("isWifiApEnabled")
-            method.isAccessible = true
-            method.invoke(wifiManager) as Boolean
-        } catch (e: Exception) {
-            false
-        }
-    }
-    
     fun getLocalIpAddress(): String? {
         try {
             val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             val ip = wifiManager.connectionInfo.ipAddress
             if (ip != 0) {
-                return String.format(
-                    "%d.%d.%d.%d",
-                    ip and 0xff,
-                    (ip shr 8) and 0xff,
-                    (ip shr 16) and 0xff,
-                    (ip shr 24) and 0xff
-                )
+                return String.format("%d.%d.%d.%d",
+                    ip and 0xff, (ip shr 8) and 0xff,
+                    (ip shr 16) and 0xff, (ip shr 24) and 0xff)
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to get local IP", e)
-        }
+        } catch (e: Exception) { }
         return null
     }
 }

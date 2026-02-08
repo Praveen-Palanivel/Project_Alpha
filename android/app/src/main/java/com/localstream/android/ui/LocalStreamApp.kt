@@ -10,10 +10,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -27,6 +30,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -45,8 +49,10 @@ import com.localstream.android.ui.model.ConnectionStatus
 import com.localstream.android.ui.model.ConnectionType
 import com.localstream.android.ui.model.LocalStreamMode
 import com.localstream.android.ui.model.LocalStreamUiState
+import com.localstream.android.ui.model.PendingTransfer
 import com.localstream.android.ui.model.TransferSnapshot
 import com.localstream.android.ui.model.TransferStatus
+import com.localstream.android.ui.model.TransportMode
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -126,6 +132,14 @@ fun LocalStreamApp() {
                 )
             }
 
+            // Transport mode selection (WiFi/Hotspot/Bluetooth)
+            item {
+                TransportModeCard(
+                    selectedMode = uiState.transportMode,
+                    onModeSelected = localStreamViewModel::setTransportMode
+                )
+            }
+
             // Connection status card
             item {
                 ConnectionCard(
@@ -197,6 +211,15 @@ fun LocalStreamApp() {
                     )
                 }
             }
+        }
+        
+        // Accept/Reject Dialog
+        if (uiState.showAcceptDialog && uiState.pendingTransfer != null) {
+            AcceptTransferDialog(
+                pendingTransfer = uiState.pendingTransfer!!,
+                onAccept = localStreamViewModel::acceptIncomingTransfer,
+                onReject = localStreamViewModel::rejectIncomingTransfer
+            )
         }
     }
 }
@@ -486,4 +509,101 @@ private fun formatBytes(bytes: Long): String {
 private fun toMbps(bytesPerSec: Long): Double {
     if (bytesPerSec <= 0L) return 0.0
     return bytesPerSec.toDouble() / (1024.0 * 1024.0)
+}
+
+@Composable
+private fun AcceptTransferDialog(
+    pendingTransfer: PendingTransfer,
+    onAccept: () -> Unit,
+    onReject: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onReject,
+        title = { Text("Incoming File") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "📁 ${pendingTransfer.fileName}",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    text = "Size: ${formatBytes(pendingTransfer.fileSize)}",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(
+                    text = "From: ${pendingTransfer.senderName}",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(
+                    text = "IP: ${pendingTransfer.senderIp}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "File will be saved to Downloads/project_alpha/",
+                    style = MaterialTheme.typography.labelMedium
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onAccept) {
+                Text("Accept")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onReject) {
+                Text("Reject")
+            }
+        }
+    )
+}
+
+@Composable
+private fun TransportModeCard(
+    selectedMode: TransportMode,
+    onModeSelected: (TransportMode) -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(text = "Transport Mode", style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = "Choose connection type for best speed",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = selectedMode == TransportMode.WIFI,
+                    onClick = { onModeSelected(TransportMode.WIFI) },
+                    label = { Text("📶 WiFi") }
+                )
+                FilterChip(
+                    selected = selectedMode == TransportMode.HOTSPOT,
+                    onClick = { onModeSelected(TransportMode.HOTSPOT) },
+                    label = { Text("📡 Hotspot") }
+                )
+                FilterChip(
+                    selected = selectedMode == TransportMode.BLUETOOTH,
+                    onClick = { onModeSelected(TransportMode.BLUETOOTH) },
+                    label = { Text("🔵 BT") }
+                )
+            }
+            when (selectedMode) {
+                TransportMode.WIFI -> Text(
+                    text = "⚡ Best for speed - connect both devices to same WiFi",
+                    style = MaterialTheme.typography.labelMedium
+                )
+                TransportMode.HOTSPOT -> Text(
+                    text = "📲 Receiver creates hotspot, sender joins it",
+                    style = MaterialTheme.typography.labelMedium
+                )
+                TransportMode.BLUETOOTH -> Text(
+                    text = "🔋 Slower, use for small files when no WiFi available",
+                    style = MaterialTheme.typography.labelMedium
+                )
+            }
+        }
+    }
 }
