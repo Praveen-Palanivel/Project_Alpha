@@ -1,4 +1,7 @@
-/core        → Agent A
-/discovery  → Agent A
-/android    → Agent B
-/windows    → Agent B
+Agent A owns:
+- /core
+- /discovery
+
+Agent B owns:
+- /android
+- /windows
