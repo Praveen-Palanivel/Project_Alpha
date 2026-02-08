@@ -5,8 +5,12 @@ This module contains the Android scaffold for LocalStream:
 - Kotlin + Jetpack Compose app shell
 - Runtime permission handling for storage/media and nearby Wi-Fi devices
 - File picker via `OpenDocument`
-- Placeholder `Send` and `Receive` controls (no networking yet)
-- UI emphasis on high-speed transfer feedback (speed/status surface)
+- Send/Receive mode switching
+- Device discovery list (mocked adapter for now)
+- Manual target IP entry
+- Simulated high-speed transfer progress with live MB/s and averages
+- Cancel and retry transfer controls
+- UI emphasis on high-speed transfer feedback (speed/progress/status surfaces)
 
 ## Module layout
 
@@ -18,4 +22,4 @@ This module contains the Android scaffold for LocalStream:
 ## Notes
 
 - Core transfer wiring is intentionally deferred to task B4.
-- Discovery/transfer protocol integration will bind to Agent A APIs later.
+- Discovery/transfer protocol integration can replace `FakeTransferCoreAdapter` with Agent A APIs.
