@@ -51,6 +51,21 @@ from .checksum import (
 from .sender import FileSender
 from .receiver import FileReceiver
 
+from .compatibility import (
+    Platform,
+    detect_platform,
+    get_platform_name,
+    pack_u16, unpack_u16,
+    pack_u32, unpack_u32,
+    pack_u64, unpack_u64,
+    normalize_path_for_protocol,
+    normalize_path_for_local,
+    resolve_filename_conflict,
+    get_default_save_directory,
+    get_capabilities,
+    sanitize_device_name,
+)
+
 __version__ = "1.0.0"
 __all__ = [
     # Types
@@ -81,4 +96,17 @@ __all__ = [
     # Main classes
     "FileSender",
     "FileReceiver",
+    # Compatibility
+    "Platform",
+    "detect_platform",
+    "get_platform_name",
+    "pack_u16", "unpack_u16",
+    "pack_u32", "unpack_u32",
+    "pack_u64", "unpack_u64",
+    "normalize_path_for_protocol",
+    "normalize_path_for_local",
+    "resolve_filename_conflict",
+    "get_default_save_directory",
+    "get_capabilities",
+    "sanitize_device_name",
 ]
