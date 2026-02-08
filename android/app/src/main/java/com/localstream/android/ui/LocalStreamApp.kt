@@ -19,7 +19,10 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -29,26 +32,31 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.localstream.android.ui.model.LocalStreamMode
+import com.localstream.android.ui.model.LocalStreamUiState
+import com.localstream.android.ui.model.TransferSnapshot
+import com.localstream.android.ui.model.TransferStatus
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LocalStreamApp() {
+fun LocalStreamApp(
+    localStreamViewModel: LocalStreamViewModel = viewModel()
+) {
     val context = LocalContext.current
+    val uiState by localStreamViewModel.uiState.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
-    var selectedFileName by rememberSaveable { mutableStateOf<String?>(null) }
-    var selectedFileUri by rememberSaveable { mutableStateOf<String?>(null) }
     var permissionStateVersion by remember { mutableIntStateOf(0) }
 
     val missingPermissions = remember(permissionStateVersion) {
@@ -71,8 +79,11 @@ fun LocalStreamApp() {
         }
 
         context.persistReadAccess(uri)
-        selectedFileUri = uri.toString()
-        selectedFileName = DocumentFile.fromSingleUri(context, uri)?.name ?: uri.lastPathSegment
+        val selectedFileName = DocumentFile.fromSingleUri(context, uri)?.name ?: uri.lastPathSegment
+        localStreamViewModel.onFileSelected(
+            fileName = selectedFileName,
+            fileUri = uri.toString()
+        )
         scope.launch {
             snackbarHostState.showSnackbar("File selected: ${selectedFileName ?: "unknown"}")
         }
@@ -94,11 +105,18 @@ fun LocalStreamApp() {
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             item {
-                HeroCard()
+                HeroCard(transfer = uiState.transfer)
             }
 
             item {
-                PermissionsCard(
+                ModeCard(
+                    selectedMode = uiState.mode,
+                    onModeSelected = localStreamViewModel::setMode
+                )
+            }
+
+            item {
+                PermissionCard(
                     missingPermissions = missingPermissions,
                     onGrantPermissions = {
                         permissionLauncher.launch(runtimePermissionsForDevice().toTypedArray())
@@ -107,36 +125,60 @@ fun LocalStreamApp() {
             }
 
             item {
-                FilePickerCard(
-                    selectedFileName = selectedFileName,
-                    onPickFile = {
-                        openDocumentLauncher.launch(arrayOf("*/*"))
+                when (uiState.mode) {
+                    LocalStreamMode.SEND -> SendSetupCard(
+                        uiState = uiState,
+                        hasAllPermissions = missingPermissions.isEmpty(),
+                        onPickFile = { openDocumentLauncher.launch(arrayOf("*/*")) },
+                        onManualIpChanged = localStreamViewModel::onManualIpChanged,
+                        onSelectPeer = localStreamViewModel::onSelectPeer,
+                        onRefreshPeers = localStreamViewModel::refreshDevices,
+                        onStartSend = {
+                            localStreamViewModel.startSend()
+                            scope.launch { snackbarHostState.showSnackbar("Send started") }
+                        }
+                    )
+                    LocalStreamMode.RECEIVE -> ReceiveSetupCard(
+                        hasAllPermissions = missingPermissions.isEmpty(),
+                        onRefreshPeers = localStreamViewModel::refreshDevices,
+                        onStartReceive = {
+                            localStreamViewModel.startReceive()
+                            scope.launch { snackbarHostState.showSnackbar("Receive started") }
+                        }
+                    )
+                }
+            }
+
+            item {
+                TransferProgressCard(
+                    transfer = uiState.transfer,
+                    onCancel = {
+                        localStreamViewModel.cancelTransfer()
+                        scope.launch { snackbarHostState.showSnackbar("Transfer cancelled") }
+                    },
+                    onRetry = {
+                        localStreamViewModel.retryLastTransfer()
+                        scope.launch { snackbarHostState.showSnackbar("Retrying transfer") }
                     }
                 )
             }
 
             item {
-                PlaceholderTransferCard(
-                    canSend = selectedFileUri != null && missingPermissions.isEmpty(),
-                    canReceive = missingPermissions.isEmpty(),
-                    onSend = {
-                        scope.launch {
-                            snackbarHostState.showSnackbar("Send placeholder: QUIC wiring in B4")
-                        }
-                    },
-                    onReceive = {
-                        scope.launch {
-                            snackbarHostState.showSnackbar("Receive placeholder: QUIC wiring in B4")
-                        }
-                    }
-                )
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Status: ${uiState.lastActionHint}",
+                        modifier = Modifier.padding(16.dp),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun HeroCard() {
+private fun HeroCard(transfer: TransferSnapshot) {
+    val speedMbs = toMbps(transfer.speedBytesPerSec)
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -153,7 +195,7 @@ private fun HeroCard() {
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(
-                text = "Live speed UI target: 100+ MB/s on gigabit LAN",
+                text = "Live speed: ${"%.1f".format(speedMbs)} MB/s",
                 style = MaterialTheme.typography.labelLarge
             )
         }
@@ -161,7 +203,31 @@ private fun HeroCard() {
 }
 
 @Composable
-private fun PermissionsCard(
+private fun ModeCard(
+    selectedMode: LocalStreamMode,
+    onModeSelected: (LocalStreamMode) -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilterChip(
+                selected = selectedMode == LocalStreamMode.SEND,
+                onClick = { onModeSelected(LocalStreamMode.SEND) },
+                label = { Text("Send") }
+            )
+            FilterChip(
+                selected = selectedMode == LocalStreamMode.RECEIVE,
+                onClick = { onModeSelected(LocalStreamMode.RECEIVE) },
+                label = { Text("Receive") }
+            )
+        }
+    }
+}
+
+@Composable
+private fun PermissionCard(
     missingPermissions: List<String>,
     onGrantPermissions: () -> Unit
 ) {
@@ -181,39 +247,111 @@ private fun PermissionsCard(
 }
 
 @Composable
-private fun FilePickerCard(
-    selectedFileName: String?,
-    onPickFile: () -> Unit
+private fun SendSetupCard(
+    uiState: LocalStreamUiState,
+    hasAllPermissions: Boolean,
+    onPickFile: () -> Unit,
+    onManualIpChanged: (String) -> Unit,
+    onSelectPeer: (String) -> Unit,
+    onRefreshPeers: () -> Unit,
+    onStartSend: () -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(text = "File Selection", style = MaterialTheme.typography.titleMedium)
-            Text(text = selectedFileName ?: "No file selected")
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(text = "Send Setup", style = MaterialTheme.typography.titleMedium)
+            Text(text = "Selected file: ${uiState.selectedFileName ?: "No file selected"}")
             Button(onClick = onPickFile) {
                 Text(text = "Pick File")
+            }
+
+            OutlinedButton(onClick = onRefreshPeers) {
+                Text("Refresh Nearby Devices")
+            }
+
+            if (uiState.peers.isEmpty()) {
+                Text("No peers discovered yet.")
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    uiState.peers.forEach { peer ->
+                        FilterChip(
+                            selected = uiState.selectedPeerId == peer.id,
+                            onClick = { onSelectPeer(peer.id) },
+                            label = { Text("${peer.displayName} (${peer.ipAddress})") }
+                        )
+                    }
+                }
+            }
+
+            OutlinedTextField(
+                value = uiState.manualIp,
+                onValueChange = onManualIpChanged,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Manual target IP") },
+                singleLine = true
+            )
+
+            Button(
+                onClick = onStartSend,
+                enabled = hasAllPermissions && uiState.selectedFileUri != null
+            ) {
+                Text("Start Send")
             }
         }
     }
 }
 
 @Composable
-private fun PlaceholderTransferCard(
-    canSend: Boolean,
-    canReceive: Boolean,
-    onSend: () -> Unit,
-    onReceive: () -> Unit
+private fun ReceiveSetupCard(
+    hasAllPermissions: Boolean,
+    onRefreshPeers: () -> Unit,
+    onStartReceive: () -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(text = "Transfer Controls (Placeholder)", style = MaterialTheme.typography.titleMedium)
-            Text(text = "Current speed: 0.0 MB/s")
-            Text(text = "Status: Ready for core integration")
+            Text(text = "Receive Setup", style = MaterialTheme.typography.titleMedium)
+            Text("Save target: Downloads")
+            Text("Protocol preference: QUIC (fallback TCP)")
+            OutlinedButton(onClick = onRefreshPeers) {
+                Text("Refresh Sender Discovery")
+            }
+            Button(onClick = onStartReceive, enabled = hasAllPermissions) {
+                Text("Start Receive")
+            }
+        }
+    }
+}
+
+@Composable
+private fun TransferProgressCard(
+    transfer: TransferSnapshot,
+    onCancel: () -> Unit,
+    onRetry: () -> Unit
+) {
+    val progress = if (transfer.totalBytes > 0L) {
+        transfer.transferredBytes.toFloat() / transfer.totalBytes.toFloat()
+    } else {
+        0f
+    }
+    val isInProgress = transfer.status == TransferStatus.TRANSFERRING || transfer.status == TransferStatus.PREPARING
+    val canRetry = transfer.status == TransferStatus.FAILED || transfer.status == TransferStatus.CANCELLED
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(text = "Transfer Progress", style = MaterialTheme.typography.titleMedium)
+            Text(text = "File: ${transfer.fileName ?: "N/A"}")
+            Text(text = "State: ${transfer.status}")
+            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+            Text("Transferred: ${formatBytes(transfer.transferredBytes)} / ${formatBytes(transfer.totalBytes)}")
+            Text("Current speed: ${"%.1f".format(toMbps(transfer.speedBytesPerSec))} MB/s")
+            Text("Average speed: ${"%.1f".format(toMbps(transfer.averageBytesPerSec))} MB/s")
+            transfer.errorMessage?.let { Text("Error: $it") }
+
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onSend, enabled = canSend) {
-                    Text("Send")
+                Button(onClick = onCancel, enabled = isInProgress) {
+                    Text("Cancel")
                 }
-                OutlinedButton(onClick = onReceive, enabled = canReceive) {
-                    Text("Receive")
+                OutlinedButton(onClick = onRetry, enabled = canRetry) {
+                    Text("Retry")
                 }
             }
         }
@@ -226,7 +364,8 @@ private fun runtimePermissionsForDevice(): List<String> {
             Manifest.permission.READ_MEDIA_IMAGES,
             Manifest.permission.READ_MEDIA_VIDEO,
             Manifest.permission.READ_MEDIA_AUDIO,
-            Manifest.permission.NEARBY_WIFI_DEVICES
+            Manifest.permission.NEARBY_WIFI_DEVICES,
+            Manifest.permission.POST_NOTIFICATIONS
         )
     } else {
         listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
@@ -240,4 +379,22 @@ private fun isPermissionGranted(context: Context, permission: String): Boolean {
 private fun Context.persistReadAccess(uri: Uri) {
     val readFlag = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
     runCatching { contentResolver.takePersistableUriPermission(uri, readFlag) }
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0L) return "0 B"
+    val kb = 1024.0
+    val mb = kb * 1024.0
+    val gb = mb * 1024.0
+    return when {
+        bytes >= gb -> "${"%.2f".format(bytes / gb)} GB"
+        bytes >= mb -> "${"%.2f".format(bytes / mb)} MB"
+        bytes >= kb -> "${"%.2f".format(bytes / kb)} KB"
+        else -> "$bytes B"
+    }
+}
+
+private fun toMbps(bytesPerSec: Long): Double {
+    if (bytesPerSec <= 0L) return 0.0
+    return bytesPerSec.toDouble() / (1024.0 * 1024.0)
 }
