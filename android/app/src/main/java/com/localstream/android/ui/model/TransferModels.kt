@@ -9,10 +9,17 @@ enum class TransferStatus {
     IDLE,
     PREPARING,
     DISCOVERING,
+    CONNECTING,
     TRANSFERRING,
     COMPLETED,
     FAILED,
     CANCELLED
+}
+
+enum class ConnectionType {
+    WIFI,
+    HOTSPOT,
+    NONE
 }
 
 data class PeerDevice(
@@ -20,6 +27,14 @@ data class PeerDevice(
     val displayName: String,
     val ipAddress: String,
     val protocol: String = "QUIC"
+)
+
+data class ConnectionStatus(
+    val isConnected: Boolean = false,
+    val connectionType: ConnectionType = ConnectionType.NONE,
+    val localIpAddress: String? = null,
+    val networkName: String? = null,
+    val statusMessage: String = "Not connected"
 )
 
 data class TransferSnapshot(
@@ -34,11 +49,14 @@ data class TransferSnapshot(
 
 data class LocalStreamUiState(
     val mode: LocalStreamMode = LocalStreamMode.SEND,
+    val connection: ConnectionStatus = ConnectionStatus(),
     val selectedFileName: String? = null,
     val selectedFileUri: String? = null,
     val selectedPeerId: String? = null,
     val manualIp: String = "",
     val peers: List<PeerDevice> = emptyList(),
     val transfer: TransferSnapshot = TransferSnapshot(),
-    val lastActionHint: String = "Ready"
+    val lastActionHint: String = "Ready",
+    val showConnectionPrompt: Boolean = false
 )
+
