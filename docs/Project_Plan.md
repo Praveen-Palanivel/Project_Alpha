@@ -357,4 +357,4 @@ STOP → Pause all work
 
 CHANGE <thing> → Modify constitution
 
-END OF PLAN
+END OF PLAN.
